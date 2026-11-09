@@ -2,6 +2,11 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { EmulatorApi, EmulatorLog } from "./shared";
 
 const api: EmulatorApi = {
+  openSamsungRemoteTestLab: () => ipcRenderer.invoke("external:samsung-rtl"),
+  selectApk: () => ipcRenderer.invoke("phone:select-apk"),
+  installApk: (serial, selectionId) => ipcRenderer.invoke("phone:install-apk", { serial, selectionId }),
+  launchPackage: (serial, packageName) => ipcRenderer.invoke("phone:launch-package", { serial, packageName }),
+  mirrorDevice: (serial) => ipcRenderer.invoke("phone:mirror", serial),
   getSdkStatus: () => ipcRenderer.invoke("sdk:status"),
   listAvds: () => ipcRenderer.invoke("avd:list"),
   listConnectedDevices: () => ipcRenderer.invoke("adb:devices"),

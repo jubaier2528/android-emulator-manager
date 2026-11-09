@@ -34,6 +34,7 @@ export interface SdkStatus {
   adbPath?: string;
   avdmanagerPath?: string;
   sdkmanagerPath?: string;
+  scrcpyPath?: string;
   message: string;
 }
 
@@ -56,7 +57,15 @@ export interface ConnectedDevice {
   serial: string;
   state: string;
   model?: string;
+  manufacturer?: string;
+  androidVersion?: string;
   avdName?: string;
+  isEmulator?: boolean;
+}
+
+export interface ApkSelection {
+  id: string;
+  name: string;
 }
 
 export interface EmulatorLog {
@@ -82,6 +91,11 @@ export interface CreateAvdOptions {
 }
 
 export interface EmulatorApi {
+  openSamsungRemoteTestLab(): Promise<void>;
+  selectApk(): Promise<ApkSelection | undefined>;
+  installApk(serial: string, selectionId: string): Promise<void>;
+  launchPackage(serial: string, packageName: string): Promise<void>;
+  mirrorDevice(serial: string): Promise<void>;
   getSdkStatus(): Promise<SdkStatus>;
   listAvds(): Promise<AvdInfo[]>;
   listConnectedDevices(): Promise<ConnectedDevice[]>;

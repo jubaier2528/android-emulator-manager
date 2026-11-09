@@ -1,10 +1,12 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type {
   AvdInfo,
+  ApkSelection,
   ConnectedDevice,
   CreateAvdOptions,
   DeviceProfile,
@@ -19,12 +21,34 @@ import type {
 const graphicsModes: GraphicsMode[] = ["auto", "host", "swiftshader_indirect", "angle_indirect", "guest"];
 const orientations: Orientation[] = ["Portrait", "Landscape"];
 const runningProcesses = new Map<string, ChildProcess>();
+const apkSelections = new Map<string, string>();
+const mirrorProcesses = new Map<string, ChildProcess>();
 let mainWindow: BrowserWindow | null = null;
 let sdkStatus: SdkStatus | undefined;
 
 function log(level: EmulatorLog["level"], message: string): void {
   const entry: EmulatorLog = { timestamp: new Date().toISOString(), level, message };
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("app:log", entry);
+}
+
+async function findOnPath(name: string): Promise<string | undefined> {
+  const filename = process.platform === "win32" ? `${name}.exe` : name;
+  const directories = [
+    ...(process.env.PATH ?? "").split(path.delimiter),
+    process.platform === "darwin" ? "/opt/homebrew/bin" : undefined,
+    process.platform === "darwin" ? "/usr/local/bin" : undefined,
+    process.platform === "linux" ? "/usr/bin" : undefined
+  ].filter((directory): directory is string => Boolean(directory));
+  for (const directory of [...new Set(directories)]) {
+    const candidate = path.join(directory, filename);
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
 }
 
 function systemImageMatchesBrand(image: SystemImage, brand: string): boolean {
@@ -69,6 +93,7 @@ async function findSdk(): Promise<SdkStatus> {
       ];
       const avdmanagerPath = await findExecutable(commandLineRoots, "avdmanager");
       const sdkmanagerPath = await findExecutable(commandLineRoots, "sdkmanager");
+      const scrcpyPath = await findOnPath("scrcpy");
       return {
         installed: true,
         sdkPath,
@@ -76,6 +101,7 @@ async function findSdk(): Promise<SdkStatus> {
         adbPath,
         avdmanagerPath,
         sdkmanagerPath,
+        scrcpyPath,
         message: avdmanagerPath
           ? "Android SDK, Emulator, ADB, and command-line tools detected."
           : "Android SDK, Emulator, and ADB detected. Install Android SDK Command-line Tools to create AVDs."
@@ -376,9 +402,116 @@ async function listConnectedDevices(): Promise<ConnectedDevice[]> {
     if (!match || match[1] === "List") continue;
     const model = match[3].match(/\bmodel:(\S+)/)?.[1]?.replaceAll("_", " ");
     const avdName = match[3].match(/\bavd:(\S+)/)?.[1];
-    devices.push({ serial: match[1], state: match[2], model, avdName });
+    const isEmulator = match[1].startsWith("emulator-");
+    const serial = match[1];
+    const [manufacturer, deviceModel, androidVersion] = isEmulator
+      ? ["Google", model, undefined]
+      : match[2] === "device"
+        ? await Promise.all([
+          run(requireTool("adbPath"), ["-s", serial, "shell", "getprop", "ro.product.manufacturer"]).catch(() => ""),
+          run(requireTool("adbPath"), ["-s", serial, "shell", "getprop", "ro.product.model"]).catch(() => ""),
+          run(requireTool("adbPath"), ["-s", serial, "shell", "getprop", "ro.build.version.release"]).catch(() => "")
+        ])
+        : ["", model, undefined];
+    devices.push({
+      serial,
+      state: match[2],
+      model: deviceModel?.trim() || model,
+      manufacturer: manufacturer?.trim() || undefined,
+      androidVersion: androidVersion?.trim() || undefined,
+      avdName,
+      isEmulator
+    });
   }
   return devices;
+}
+
+function validatePhysicalSerial(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(value) || value.startsWith("emulator-")) {
+    throw new Error("Select a connected physical Android phone.");
+  }
+  return value;
+}
+
+async function requireConnectedPhone(serial: string): Promise<void> {
+  const devices = await listConnectedDevices();
+  if (!devices.some((device) => device.serial === serial && device.state === "device" && !device.isEmulator)) {
+    throw new Error(`Phone ${serial} is not connected and authorized. Connect it and accept the USB debugging prompt.`);
+  }
+}
+
+async function selectApk(): Promise<ApkSelection | undefined> {
+  const options: OpenDialogOptions = {
+    title: "Select an Android APK to install",
+    properties: ["openFile"],
+    filters: [{ name: "Android application", extensions: ["apk"] }]
+  } as const;
+  const result = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options);
+  if (result.canceled || !result.filePaths[0]) return undefined;
+  const apkPath = result.filePaths[0];
+  if (path.extname(apkPath).toLowerCase() !== ".apk") throw new Error("Select a valid .apk file.");
+  const id = randomUUID();
+  apkSelections.clear();
+  apkSelections.set(id, apkPath);
+  return { id, name: path.basename(apkPath) };
+}
+
+async function installApk(value: unknown): Promise<void> {
+  if (!value || typeof value !== "object") throw new Error("Select an APK and a phone first.");
+  const options = value as { serial?: unknown; selectionId?: unknown };
+  const serial = validatePhysicalSerial(options.serial);
+  if (typeof options.selectionId !== "string") throw new Error("Select an APK file first.");
+  const apkPath = apkSelections.get(options.selectionId);
+  if (!apkPath) throw new Error("The APK selection expired. Select the APK file again.");
+  await requireConnectedPhone(serial);
+  log("info", `Installing ${path.basename(apkPath)} on ${serial}...`);
+  const output = await run(requireTool("adbPath"), ["-s", serial, "install", "-r", apkPath], 180_000);
+  apkSelections.delete(options.selectionId);
+  log("success", output.trim() || `Installed ${path.basename(apkPath)} on ${serial}.`);
+}
+
+async function launchPackage(value: unknown): Promise<void> {
+  if (!value || typeof value !== "object") throw new Error("Select a phone and enter an app package name.");
+  const options = value as { serial?: unknown; packageName?: unknown };
+  const serial = validatePhysicalSerial(options.serial);
+  if (typeof options.packageName !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(options.packageName)) {
+    throw new Error("Enter a valid Android package name, for example com.example.myapp.");
+  }
+  await requireConnectedPhone(serial);
+  const output = await run(requireTool("adbPath"), ["-s", serial, "shell", "monkey", "-p", options.packageName, "-c", "android.intent.category.LAUNCHER", "1"]);
+  if (/no activities found to run|monkey aborted/i.test(output)) {
+    throw new Error(`No launchable activity was found for ${options.packageName} on ${serial}.`);
+  }
+  log("success", `Launched ${options.packageName} on ${serial}.`);
+}
+
+async function mirrorDevice(value: unknown): Promise<void> {
+  const serial = validatePhysicalSerial(value);
+  await requireConnectedPhone(serial);
+  const executable = sdkStatus?.scrcpyPath ?? await findOnPath("scrcpy");
+  if (!executable) {
+    throw new Error("scrcpy is not installed. Install scrcpy locally, restart the manager, then use Mirror screen.");
+  }
+  const existing = mirrorProcesses.get(serial);
+  if (existing && existing.exitCode === null) {
+    log("info", `A screen mirror is already open for ${serial}.`);
+    return;
+  }
+  const child = spawn(executable, ["--serial", serial], {
+    shell: false,
+    windowsHide: true,
+    stdio: "ignore"
+  });
+  mirrorProcesses.set(serial, child);
+  child.once("error", (error) => {
+    mirrorProcesses.delete(serial);
+    log("error", `Could not start scrcpy: ${error.message}`);
+  });
+  child.once("exit", () => mirrorProcesses.delete(serial));
+  child.unref();
+  log("success", `Opened a local screen mirror for ${serial}.`);
 }
 
 function validateLaunchOptions(value: unknown): LaunchOptions {
@@ -593,6 +726,13 @@ function profileMatchesCatalogDevice(profile: DeviceProfile, name: string, vendo
 }
 
 function registerIpc(): void {
+  ipcMain.handle("external:samsung-rtl", async () => {
+    await shell.openExternal("https://developer.samsung.com/remote-test-lab");
+  });
+  ipcMain.handle("phone:select-apk", async () => selectApk());
+  ipcMain.handle("phone:install-apk", async (_event, value: unknown) => installApk(value));
+  ipcMain.handle("phone:launch-package", async (_event, value: unknown) => launchPackage(value));
+  ipcMain.handle("phone:mirror", async (_event, value: unknown) => mirrorDevice(value));
   ipcMain.handle("sdk:status", async () => getSdk());
   ipcMain.handle("avd:list", async () => listAvds());
   ipcMain.handle("adb:devices", async () => listConnectedDevices());
@@ -623,7 +763,17 @@ function createWindow(): void {
       sandbox: true
     }
   });
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const destination = new URL(url);
+      if (destination.origin === "https://developer.samsung.com" && destination.pathname === "/remote-test-lab") {
+        void shell.openExternal(destination.toString());
+      }
+    } catch (error) {
+      log("warning", `Blocked invalid external link: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return { action: "deny" };
+  });
   if (process.env.VITE_DEV_SERVER_URL || !app.isPackaged) {
     void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5173");
   } else {

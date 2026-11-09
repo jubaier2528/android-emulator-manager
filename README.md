@@ -63,6 +63,26 @@ Electron inherits environment variables from the process that starts it. If you 
 - Starts an installed AVD with `emulator -avd <name> -gpu <mode>`, applies portrait/landscape rotation with ADB after startup, and stops it with `adb -s <serial> emu kill`.
 - Creates AVDs only from exact manufacturer profiles returned by `avdmanager list device` and SDK-installed images with matching vendor and OS-flavor metadata. Samsung images must identify One UI, Xiaomi images HyperOS/MIUI, and OnePlus images OxygenOS. It refuses to pass off stock Android or a Pixel profile as another manufacturer's device/OS.
 - Keeps an activity log and displays SDK, AVD, running emulator, and ADB-connected device status.
+- Includes a Samsung Remote Test Lab launchpad that opens Samsung's official service and explains its sign-in/device-selection flow. Samsung handles the remote session on its own website; this app does not embed or control it.
+- Includes a **Local phones** workspace for physical Android devices connected over USB/ADB. It can install a user-selected APK, launch an app by package ID, and open a local `scrcpy` mirror when installed.
+
+## Samsung Remote Test Lab
+
+Open **Remote devices** in the app and choose **Open Samsung Remote Test Lab**. Sign in on Samsung's site, check its current Galaxy device inventory, and start the session there. Samsung manages the account, device availability, reservation, and remote stream. This launchpad does not claim a public RTL API or embedded device session.
+
+For Google Pixel local AVDs, use **Overview** and the installed Android SDK. To use other manufacturers' real devices, use a physical device or a provider that offers an authorized API/SDK for the desired workflow; Samsung Remote Test Lab is Samsung-device-only.
+
+## Test on a physical Galaxy locally
+
+This is the way to test actual Samsung One UI on your own computer without a cloud session:
+
+1. Connect a Galaxy phone to the computer with a data-capable USB cable and unlock it.
+2. On the phone, enable **Developer options** (tap **Build number** seven times under **Settings → About phone → Software information**) and turn on **USB debugging**.
+3. Accept the phone's USB debugging authorization prompt.
+4. Open **Local phones** in the app and click **Refresh**. Select the authorized device.
+5. Choose an APK to install, enter its Android application ID to launch it, or install `scrcpy` locally and restart the manager to mirror the screen on your computer.
+
+The app only passes the path returned by its native APK picker to `adb install`; device serials and package IDs are validated before use. This requires a physical phone—you cannot run One UI on an AVD or produce it with a skin.
 
 ## Troubleshooting
 

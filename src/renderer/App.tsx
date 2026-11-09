@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import {
   Activity, AlertCircle, ArrowDownToLine, ArrowLeftRight, ChevronDown, ChevronRight,
-  CircleHelp, Clock3, Code2, Cpu, Database, Heart, LayoutDashboard, LoaderCircle, MemoryStick,
+  CircleHelp, Clock3, Code2, Cpu, Database, ExternalLink, Heart, LayoutDashboard, LoaderCircle, MemoryStick,
   Monitor, MoreHorizontal, Play, Plus, RefreshCw, RotateCw, Search, Settings2, Smartphone,
-  Sparkles, Terminal, Trash2, Usb, X
+  Sparkles, Terminal, Trash2, Usb, X, Cloud
 } from "lucide-react";
 import type {
-  AvdInfo, ConnectedDevice, DeviceProfile, EmulatorLog, GraphicsMode, Orientation, SdkStatus, SystemImage
+  ApkSelection, AvdInfo, ConnectedDevice, DeviceProfile, EmulatorLog, GraphicsMode, Orientation, SdkStatus, SystemImage
 } from "../electron/shared";
 import { brands, devices, type CatalogDevice } from "./devices";
 import { PhoneArt } from "./PhoneArt";
 
-type Page = "dashboard" | "avds" | "logs";
+type Page = "dashboard" | "avds" | "phones" | "remote" | "logs";
 const graphicsOptions: { value: GraphicsMode; label: string }[] = [
   { value: "auto", label: "Automatic" },
   { value: "host", label: "Hardware accelerated" },
@@ -98,6 +98,10 @@ function App() {
   const [sdk, setSdk] = useState<SdkStatus>({ installed: false, message: "Checking for Android SDK..." });
   const [avds, setAvds] = useState<AvdInfo[]>([]);
   const [connected, setConnected] = useState<ConnectedDevice[]>([]);
+  const [selectedPhoneSerial, setSelectedPhoneSerial] = useState("");
+  const [apkSelection, setApkSelection] = useState<ApkSelection>();
+  const [packageName, setPackageName] = useState("");
+  const [phoneBusy, setPhoneBusy] = useState(false);
   const [selected, setSelected] = useState<CatalogDevice | null>(null);
   const [selectedAvd, setSelectedAvd] = useState("");
   const [orientation, setOrientation] = useState<Orientation>("Portrait");
@@ -126,6 +130,79 @@ function App() {
   const addLog = useCallback((level: EmulatorLog["level"], message: string) => {
     setLogs((current) => [{ timestamp: new Date().toISOString(), level, message }, ...current].slice(0, 100));
   }, []);
+
+  async function openSamsungRemoteTestLab() {
+    try {
+      if (window.emulatorManager) {
+        await window.emulatorManager.openSamsungRemoteTestLab();
+      } else {
+        window.open("https://developer.samsung.com/remote-test-lab", "_blank", "noopener,noreferrer");
+      }
+      addLog("info", "Opened Samsung Remote Test Lab. Sign in and select an available Galaxy device on Samsung's site.");
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message);
+      addLog("error", message);
+    }
+  }
+
+  async function chooseApkFile() {
+    try {
+      const selection = await window.emulatorManager.selectApk();
+      if (selection) setApkSelection(selection);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message);
+      addLog("error", message);
+    }
+  }
+
+  async function installSelectedApk() {
+    if (!selectedPhoneSerial || !apkSelection) return;
+    setPhoneBusy(true);
+    setError("");
+    try {
+      await window.emulatorManager.installApk(selectedPhoneSerial, apkSelection.id);
+      addLog("success", `Installed ${apkSelection.name} on ${selectedPhoneSerial}.`);
+      setApkSelection(undefined);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message);
+      addLog("error", message);
+    } finally {
+      setPhoneBusy(false);
+    }
+  }
+
+  async function launchPhonePackage() {
+    if (!selectedPhoneSerial || !packageName) return;
+    setPhoneBusy(true);
+    setError("");
+    try {
+      await window.emulatorManager.launchPackage(selectedPhoneSerial, packageName);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message);
+      addLog("error", message);
+    } finally {
+      setPhoneBusy(false);
+    }
+  }
+
+  async function mirrorPhone() {
+    if (!selectedPhoneSerial) return;
+    setPhoneBusy(true);
+    setError("");
+    try {
+      await window.emulatorManager.mirrorDevice(selectedPhoneSerial);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message);
+      addLog("error", message);
+    } finally {
+      setPhoneBusy(false);
+    }
+  }
 
   const refresh = useCallback(async (silent = false) => {
     if (!silent) setRefreshing(true);
@@ -157,6 +234,11 @@ function App() {
       setImages(nextImages);
       setProfileInventoryLoaded(true);
       setSelectedAvd((current) => current && nextAvds.some((avd) => avd.name === current) ? current : "");
+      setSelectedPhoneSerial((current) =>
+        current && nextConnected.some((device) => device.serial === current && !device.isEmulator)
+          ? current
+          : nextConnected.find((device) => device.state === "device" && !device.isEmulator)?.serial ?? ""
+      );
       if (!silent) addLog("success", `Refreshed Android SDK · ${nextAvds.length} AVD${nextAvds.length === 1 ? "" : "s"} · ${nextConnected.length} connected device${nextConnected.length === 1 ? "" : "s"}.`);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
@@ -468,6 +550,8 @@ function App() {
         <nav className="side-nav" aria-label="Main navigation">
           <button className={page === "dashboard" ? "nav-item active" : "nav-item"} onClick={() => setPage("dashboard")}><LayoutDashboard size={17} /> Overview</button>
           <button className={page === "avds" ? "nav-item active" : "nav-item"} onClick={() => setPage("avds")}><Smartphone size={17} /> My virtual devices <span className="nav-count">{avds.length}</span></button>
+          <button className={page === "phones" ? "nav-item active" : "nav-item"} onClick={() => setPage("phones")}><Usb size={17} /> Local phones</button>
+          <button className={page === "remote" ? "nav-item active" : "nav-item"} onClick={() => setPage("remote")}><Cloud size={17} /> Remote devices</button>
           <button className={page === "logs" ? "nav-item active" : "nav-item"} onClick={() => setPage("logs")}><Terminal size={17} /> Logs & diagnostics</button>
         </nav>
         <div className="sidebar-divider" />
@@ -492,7 +576,7 @@ function App() {
 
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumbs"><span>Workspace</span><ChevronRight size={14} /><strong>{page === "dashboard" ? "Overview" : page === "avds" ? "My virtual devices" : "Logs & diagnostics"}</strong></div>
+          <div className="breadcrumbs"><span>Workspace</span><ChevronRight size={14} /><strong>{page === "dashboard" ? "Overview" : page === "avds" ? "My virtual devices" : page === "phones" ? "Local phones" : page === "remote" ? "Remote devices" : "Logs & diagnostics"}</strong></div>
           <div className="topbar-actions">
             <span className="connection-state"><span className={sdk.installed ? "status-dot good" : "status-dot"} /> {sdk.installed ? "SDK connected" : "SDK offline"}</span>
             <button className="icon-button" title="Refresh SDK and devices" onClick={() => void refresh()} disabled={refreshing}>
@@ -605,6 +689,107 @@ function App() {
                 if (match) { chooseDevice(match); setSelectedAvd(avd.name); }
                 void launchInstalledAvd(avd, match);
               }} onStop={() => void stopAvd(avd.name)} onRestart={() => void restartAvd(avd)} />)}</div> : <EmptyState icon={<Smartphone size={22} />} title="No virtual devices yet" detail="Choose a phone model in Overview, then create an AVD using an installed SDK profile and system image." action={<button className="primary-button" onClick={() => { setPage("dashboard"); if (!selected) chooseDevice(devices[0]); }}>Browse phone models <ChevronRight size={15} /></button>} />}
+            </div>
+          )}
+
+          {page === "phones" && (
+            <div className="subpage local-phones-page">
+              <div className="eyebrow"><Usb size={13} /> YOUR PHYSICAL ANDROID DEVICES</div>
+              <h1>Local <span>phones.</span></h1>
+              <p className="subpage-intro">Connect a real phone to test its actual manufacturer OS—Samsung One UI, Xiaomi HyperOS, or other vendor software—directly on this computer.</p>
+              {error && <div className="error-banner" role="alert"><AlertCircle size={17} /><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss error"><X size={16} /></button></div>}
+              <div className="phone-connect-card">
+                <div className="phone-connect-header">
+                  <div className="lower-icon mint"><Usb size={17} /></div>
+                  <div><strong>USB / ADB devices</strong><span>Detected locally by Android Debug Bridge</span></div>
+                  <button className="secondary-button" onClick={() => void refresh()} disabled={refreshing}><RefreshCw size={14} className={refreshing ? "spin" : ""} /> Refresh</button>
+                </div>
+                {connected.filter((device) => !device.isEmulator).length ? (
+                  <div className="physical-device-list">{connected.filter((device) => !device.isEmulator).map((device) => (
+                    <button key={device.serial} className={`physical-device${selectedPhoneSerial === device.serial ? " selected" : ""}`} onClick={() => setSelectedPhoneSerial(device.serial)} disabled={device.state !== "device"}>
+                      <div className="physical-device-icon"><Smartphone size={21} /></div>
+                      <span className="physical-device-details"><strong>{device.manufacturer ? `${device.manufacturer} ` : ""}{device.model || device.serial}</strong><small>{device.serial} · Android {device.androidVersion || "version unknown"}</small></span>
+                      <span className={`device-state ${device.state === "device" ? "online" : ""}`} />{device.state}
+                    </button>
+                  ))}</div>
+                ) : (
+                  <div className="phone-empty-state">
+                    <Smartphone size={25} />
+                    <strong>No physical phone connected</strong>
+                    <span>This Mac currently sees no Android phone. A real Samsung phone is required to run One UI locally.</span>
+                  </div>
+                )}
+              </div>
+              <div className="phone-actions-grid">
+                <section className="phone-action-card">
+                  <div className="panel-title"><span className="step-count">01</span><div><h2>Install your test app</h2><p>Choose an APK and install it to the selected phone</p></div></div>
+                  <div className="phone-action-controls">
+                    <button className="secondary-button" onClick={() => void chooseApkFile()} disabled={!selectedPhoneSerial || phoneBusy}><Plus size={14} /> {apkSelection?.name ?? "Choose APK…"}</button>
+                    <button className="primary-button" onClick={() => void installSelectedApk()} disabled={!selectedPhoneSerial || !apkSelection || phoneBusy}>{phoneBusy ? <LoaderCircle className="spin" size={14} /> : <ArrowDownToLine size={14} />} INSTALL APK</button>
+                  </div>
+                  <p className="phone-action-hint">Only the APK selected through the native file picker is passed to ADB.</p>
+                </section>
+                <section className="phone-action-card">
+                  <div className="panel-title"><span className="step-count">02</span><div><h2>Launch your app</h2><p>Open an installed app by its Android package name</p></div></div>
+                  <div className="phone-action-controls">
+                    <input className="package-input" value={packageName} onChange={(event) => setPackageName(event.target.value)} placeholder="com.example.myapp" aria-label="Android app package name" />
+                    <button className="primary-button" onClick={() => void launchPhonePackage()} disabled={!selectedPhoneSerial || !packageName || phoneBusy}><Play size={14} fill="currentColor" /> LAUNCH</button>
+                  </div>
+                  <p className="phone-action-hint">Find the application ID in your Android project’s Gradle configuration.</p>
+                </section>
+                <section className="phone-action-card mirror-card">
+                  <div className="panel-title"><span className="step-count">03</span><div><h2>Mirror the phone screen</h2><p>Open a local interactive view with scrcpy</p></div></div>
+                  <div className="phone-action-controls">
+                    <button className="primary-button" onClick={() => void mirrorPhone()} disabled={!selectedPhoneSerial || !sdk.scrcpyPath || phoneBusy}><Monitor size={14} /> MIRROR SCREEN</button>
+                    <span className={`mirror-availability${sdk.scrcpyPath ? " ready" : ""}`}>{sdk.scrcpyPath ? "scrcpy detected" : "scrcpy not installed"}</span>
+                  </div>
+                  {!sdk.scrcpyPath && <p className="phone-action-hint">Install scrcpy on this Mac, then restart the manager. This opens a local mirror—not a remote/browser session.</p>}
+                </section>
+              </div>
+              <section className="phone-setup">
+                <div className="panel-title"><span className="step-count">04</span><div><h2>One-time setup on the Galaxy</h2><p>Required before ADB can detect and control your device</p></div></div>
+                <ol>
+                  <li>On the Galaxy, open <strong>Settings → About phone → Software information</strong>, then tap <strong>Build number</strong> seven times.</li>
+                  <li>Open <strong>Developer options</strong> and enable <strong>USB debugging</strong>.</li>
+                  <li>Connect the phone to this Mac with a data-capable USB cable; unlock it and accept the <strong>Allow USB debugging</strong> prompt.</li>
+                  <li>Press <strong>Refresh</strong> above. Choose the physical phone and install your APK.</li>
+                </ol>
+                <div className="phone-setup-note"><AlertCircle size={15} /> No phone is currently connected. You’ll need access to a physical Galaxy; this app cannot emulate Samsung One UI.</div>
+              </section>
+            </div>
+          )}
+
+          {page === "remote" && (
+            <div className="subpage remote-page">
+              <section className="welcome-row">
+                <div>
+                  <div className="eyebrow"><Cloud size={13} /> REAL SAMSUNG DEVICES</div>
+                  <h1>Remote <span>test lab.</span></h1>
+                  <p>Use Samsung’s hosted Galaxy phones to test the real One UI experience.</p>
+                </div>
+              </section>
+              <section className="remote-hero">
+                <div className="remote-hero-icon"><Smartphone size={27} /></div>
+                <div className="remote-hero-copy">
+                  <span className="remote-provider-label">SAMSUNG REMOTE TEST LAB</span>
+                  <h2>Test on a real Galaxy device</h2>
+                  <p>Samsung hosts the devices and runs the interactive testing session on its own website. Sign in there to see which Galaxy models are currently available and start a session.</p>
+                  <button className="primary-button remote-launch" onClick={() => void openSamsungRemoteTestLab()}>
+                    <ExternalLink size={15} /> OPEN SAMSUNG REMOTE TEST LAB
+                  </button>
+                </div>
+                <div className="remote-status"><span className="status-dot good" /> Hosted by Samsung</div>
+              </section>
+              <section className="remote-steps">
+                <div className="panel-title"><span className="step-count">01</span><div><h2>How to start</h2><p>The device session is managed by Samsung</p></div></div>
+                <div className="remote-step-grid">
+                  <article className="remote-step"><span>01</span><h3>Sign in</h3><p>Sign in or create an eligible Samsung Developer account on the Remote Test Lab website.</p></article>
+                  <article className="remote-step"><span>02</span><h3>Choose a Galaxy</h3><p>Check Samsung’s live catalog for the model, region, and software version you want.</p></article>
+                  <article className="remote-step"><span>03</span><h3>Start testing</h3><p>Reserve an available device and interact with it in Samsung’s hosted session.</p></article>
+                </div>
+              </section>
+              <div className="remote-notice"><CircleHelp size={16} /><p><strong>Integration note</strong>This launchpad opens Samsung’s official service. Samsung handles login, device availability, reservations, and the live device stream; those sessions are not embedded or controlled inside this app.</p></div>
+              <div className="remote-secondary"><div><strong>Need other brands?</strong><span>Samsung Remote Test Lab provides Samsung devices only. Other brands require another real-device cloud provider or physical phones.</span></div><button className="secondary-button" onClick={() => setPage("dashboard")}><Smartphone size={15} /> Local Android SDK</button></div>
             </div>
           )}
 
