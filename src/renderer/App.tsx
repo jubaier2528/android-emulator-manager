@@ -2,16 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type
 import {
   Activity, AlertCircle, ArrowDownToLine, ArrowLeftRight, ChevronDown, ChevronRight,
   CircleHelp, Clock3, Code2, Cpu, Database, ExternalLink, Heart, LayoutDashboard, LoaderCircle, MemoryStick,
-  MapPin, Monitor, MoreHorizontal, Play, Plus, RefreshCw, RotateCw, Search, Settings2, Smartphone,
+  MapPin, Monitor, MoreHorizontal, Play, Plus, Power, RefreshCw, RotateCw, Search, Settings2, Smartphone,
   Sparkles, Terminal, Trash2, Usb, Wifi, X, Cloud
 } from "lucide-react";
 import type {
-  ApkSelection, AvdInfo, ConnectedDevice, DeviceProfile, EmulatorLog, EmulatorProxy, GraphicsMode, Orientation, ProxyMode, SdkStatus, SystemImage
+  ApkSelection, AvdInfo, ConnectedDevice, DeviceProfile, EmulatorLog, EmulatorProxy, GraphicsMode, IosSimulatorStatus, Orientation, ProxyMode, SdkStatus, SystemImage
 } from "../electron/shared";
 import { brands, devices, type CatalogDevice } from "./devices";
 import { PhoneArt } from "./PhoneArt";
 
-type Page = "dashboard" | "avds" | "phones" | "remote" | "logs";
+type Page = "dashboard" | "avds" | "phones" | "ios" | "remote" | "logs";
 const graphicsOptions: { value: GraphicsMode; label: string }[] = [
   { value: "auto", label: "Automatic" },
   { value: "host", label: "Hardware accelerated" },
@@ -98,6 +98,12 @@ function App() {
   const [sdk, setSdk] = useState<SdkStatus>({ installed: false, message: "Checking for Android SDK..." });
   const [avds, setAvds] = useState<AvdInfo[]>([]);
   const [connected, setConnected] = useState<ConnectedDevice[]>([]);
+  const [iosSimulators, setIosSimulators] = useState<IosSimulatorStatus>({
+    available: false,
+    message: "Checking for Xcode iPhone simulators...",
+    devices: []
+  });
+  const [iosBusyUdid, setIosBusyUdid] = useState("");
   const [selectedPhoneSerial, setSelectedPhoneSerial] = useState("");
   const [apkSelection, setApkSelection] = useState<ApkSelection>();
   const [packageName, setPackageName] = useState("");
@@ -114,9 +120,10 @@ function App() {
   const [proxyUsername, setProxyUsername] = useState("");
   const [proxyPassword, setProxyPassword] = useState("");
   const [proxyTesting, setProxyTesting] = useState(false);
+  const [proxyConnecting, setProxyConnecting] = useState(false);
   const [proxyTestResult, setProxyTestResult] = useState<{ ok: boolean; message: string }>();
-  const [gpsLatitude, setGpsLatitude] = useState("");
-  const [gpsLongitude, setGpsLongitude] = useState("");
+  const [gpsLatitude, setGpsLatitude] = useState(() => readStorage("aem-gps-latitude", ""));
+  const [gpsLongitude, setGpsLongitude] = useState(() => readStorage("aem-gps-longitude", ""));
   const [gpsBusy, setGpsBusy] = useState(false);
   const [gpsResult, setGpsResult] = useState("");
   const [query, setQuery] = useState("");
@@ -217,6 +224,22 @@ function App() {
     }
   }
 
+  async function changeIosSimulatorState(udid: string, action: "boot" | "shutdown") {
+    setIosBusyUdid(udid);
+    setError("");
+    try {
+      if (action === "boot") await window.emulatorManager.bootIosSimulator(udid);
+      else await window.emulatorManager.shutdownIosSimulator(udid);
+      await refresh(true);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message);
+      addLog("error", message);
+    } finally {
+      setIosBusyUdid("");
+    }
+  }
+
   const refresh = useCallback(async (silent = false) => {
     if (!silent) setRefreshing(true);
     setError("");
@@ -224,11 +247,16 @@ function App() {
       if (!window.emulatorManager) {
         const message = "Open this dashboard in the Android Emulator Manager desktop app to connect to the Android SDK.";
         setSdk({ installed: false, message });
+        setIosSimulators({ available: false, message: "Open the desktop app to detect Xcode iPhone simulators.", devices: [] });
         setError(message);
         return;
       }
-      const currentSdk = await window.emulatorManager.getSdkStatus();
+      const [currentSdk, currentIosSimulators] = await Promise.all([
+        window.emulatorManager.getSdkStatus(),
+        window.emulatorManager.getIosSimulatorStatus()
+      ]);
       setSdk(currentSdk);
+      setIosSimulators(currentIosSimulators);
       if (!currentSdk.installed) {
         setAvds([]);
         setConnected([]);
@@ -287,6 +315,11 @@ function App() {
   }, [proxyHost, proxyMode, proxyPort]);
 
   useEffect(() => {
+    localStorage.setItem("aem-gps-latitude", JSON.stringify(gpsLatitude));
+    localStorage.setItem("aem-gps-longitude", JSON.stringify(gpsLongitude));
+  }, [gpsLatitude, gpsLongitude]);
+
+  useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -316,12 +349,26 @@ function App() {
   const createImages = selected ? images.filter((image) => nativeSystemImage([image], selected) !== undefined) : [];
   const emulatorProxy: EmulatorProxy = proxyMode === "none"
     ? { mode: "none" }
-    : {
+    : proxyMode === "system"
+      ? { mode: "system" }
+      : {
       mode: proxyMode,
       host: proxyHost.trim(),
       port: Number(proxyPort),
       ...(proxyUsername || proxyPassword ? { username: proxyUsername, password: proxyPassword } : {})
     };
+
+  function configuredGpsLocation(): { latitude: number; longitude: number } | undefined {
+    if (!gpsLatitude.trim() && !gpsLongitude.trim()) return undefined;
+    const latitude = Number(gpsLatitude);
+    const longitude = Number(gpsLongitude);
+    if (!gpsLatitude.trim() || !gpsLongitude.trim() ||
+      !Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+      !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      throw new Error("Enter latitude -90 to 90 and longitude -180 to 180.");
+    }
+    return { latitude, longitude };
+  }
 
   function chooseDevice(device: CatalogDevice) {
     setSelected(device);
@@ -460,7 +507,8 @@ function App() {
         orientation,
         graphics,
         charging,
-        proxy: emulatorProxy
+        proxy: emulatorProxy,
+        location: configuredGpsLocation()
       });
       setRecent((current) => [device.id, ...current.filter((id) => id !== device.id)].slice(0, 5));
       await refresh(true);
@@ -488,7 +536,8 @@ function App() {
         orientation,
         graphics,
         charging,
-        proxy: emulatorProxy
+        proxy: emulatorProxy,
+        location: configuredGpsLocation()
       });
       if (device) setRecent((current) => [device.id, ...current.filter((id) => id !== device.id)].slice(0, 5));
       await refresh(true);
@@ -552,21 +601,32 @@ function App() {
     }
   }
 
+  async function connectConfiguredProxy() {
+    if (!activeAvd || activeAvd.status !== "running") return;
+    setProxyConnecting(true);
+    setProxyTestResult(undefined);
+    try {
+      await window.emulatorManager.connectProxy(activeAvd.name, emulatorProxy);
+      setProxyTestResult({ ok: true, message: `Proxy connected to ${activeAvd.displayName} through ADB.` });
+      addLog("success", `${activeAvd.displayName} proxy connected through ADB.`);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setProxyTestResult({ ok: false, message });
+      addLog("error", `Could not connect proxy to emulator: ${message}`);
+    } finally {
+      setProxyConnecting(false);
+    }
+  }
+
   async function setEmulatorGpsLocation() {
     if (!activeAvd || activeAvd.status !== "running") return;
-    const latitude = Number(gpsLatitude);
-    const longitude = Number(gpsLongitude);
-    if (!gpsLatitude.trim() || !gpsLongitude.trim() ||
-      !Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
-      !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
-      setGpsResult("Enter latitude -90 to 90 and longitude -180 to 180.");
-      return;
-    }
     setGpsBusy(true);
     setGpsResult("");
     try {
-      await window.emulatorManager.setEmulatorLocation(activeAvd.name, latitude, longitude);
-      setGpsResult(`Location sent: ${latitude}, ${longitude}`);
+      const location = configuredGpsLocation();
+      if (!location) throw new Error("Enter latitude and longitude first.");
+      await window.emulatorManager.setEmulatorLocation(activeAvd.name, location.latitude, location.longitude);
+      setGpsResult(`Location sent: ${location.latitude}, ${location.longitude}`);
       addLog("success", `${activeAvd.displayName} emulator location updated.`);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
@@ -642,6 +702,7 @@ function App() {
           <button className={page === "dashboard" ? "nav-item active" : "nav-item"} onClick={() => setPage("dashboard")}><LayoutDashboard size={17} /> Overview</button>
           <button className={page === "avds" ? "nav-item active" : "nav-item"} onClick={() => setPage("avds")}><Smartphone size={17} /> My virtual devices <span className="nav-count">{avds.length}</span></button>
           <button className={page === "phones" ? "nav-item active" : "nav-item"} onClick={() => setPage("phones")}><Usb size={17} /> Local phones</button>
+          <button className={page === "ios" ? "nav-item active" : "nav-item"} onClick={() => setPage("ios")}><Smartphone size={17} /> iPhone Simulator <span className="nav-count">{iosSimulators.devices.length}</span></button>
           <button className={page === "remote" ? "nav-item active" : "nav-item"} onClick={() => setPage("remote")}><Cloud size={17} /> Remote devices</button>
           <button className={page === "logs" ? "nav-item active" : "nav-item"} onClick={() => setPage("logs")}><Terminal size={17} /> Logs & diagnostics</button>
         </nav>
@@ -667,7 +728,7 @@ function App() {
 
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumbs"><span>Workspace</span><ChevronRight size={14} /><strong>{page === "dashboard" ? "Overview" : page === "avds" ? "My virtual devices" : page === "phones" ? "Local phones" : page === "remote" ? "Remote devices" : "Logs & diagnostics"}</strong></div>
+          <div className="breadcrumbs"><span>Workspace</span><ChevronRight size={14} /><strong>{page === "dashboard" ? "Overview" : page === "avds" ? "My virtual devices" : page === "phones" ? "Local phones" : page === "ios" ? "iPhone Simulator" : page === "remote" ? "Remote devices" : "Logs & diagnostics"}</strong></div>
           <div className="topbar-actions">
             <span className="connection-state"><span className={sdk.installed ? "status-dot good" : "status-dot"} /> {sdk.installed ? "SDK connected" : "SDK offline"}</span>
             <button className="icon-button" title="Refresh SDK and devices" onClick={() => void refresh()} disabled={refreshing}>
@@ -744,27 +805,30 @@ function App() {
                   <div className="setting-row power-row"><div><strong>AC charging</strong><span>{activeAvd?.status === "running" ? "Applied immediately" : "Applied when emulator opens"}</span></div><div className="segmented-control" role="group" aria-label="Emulator AC charging"><button className={charging ? "chosen" : ""} onClick={() => void updateCharging(true)} aria-pressed={charging} disabled={chargingBusy || emulatorStarting}>Charging</button><button className={!charging ? "chosen" : ""} onClick={() => void updateCharging(false)} aria-pressed={!charging} disabled={chargingBusy || emulatorStarting}>Off</button></div></div>
                   <div className="setting-row graphics-row"><div><strong>Graphics</strong><span>Emulator rendering mode</span></div><select value={graphics} onChange={(event) => setGraphics(event.target.value as GraphicsMode)} aria-label="Emulator graphics mode">{graphicsOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
                   <div className="proxy-setting">
-                    <label className="proxy-mode"><span><strong>Network proxy</strong><small>Applied when emulator starts</small></span><select value={proxyMode} onChange={(event) => setProxyMode(event.target.value as ProxyMode)} aria-label="Emulator network proxy"><option value="none">No proxy</option><option value="http">HTTP proxy</option><option value="socks5">SOCKS5</option></select></label>
-                    {proxyMode !== "none" && <div className="proxy-fields">
+                    <label className="proxy-mode"><span><strong>Network proxy</strong><small>Connect now or apply when emulator starts</small></span><select value={proxyMode} onChange={(event) => setProxyMode(event.target.value as ProxyMode)} aria-label="Emulator network proxy"><option value="none">No proxy</option><option value="system">Use system proxy</option><option value="http">HTTP proxy</option><option value="socks5">SOCKS5</option></select></label>
+                    {proxyMode !== "none" && proxyMode !== "system" && <div className="proxy-fields">
                       <input value={proxyHost} onChange={(event) => setProxyHost(event.target.value)} placeholder="Proxy host or IP" aria-label="Proxy host or IP" autoComplete="off" />
                       <input value={proxyPort} onChange={(event) => setProxyPort(event.target.value)} type="number" min="1" max="65535" placeholder="Port" aria-label="Proxy port" />
                       <input value={proxyUsername} onChange={(event) => setProxyUsername(event.target.value)} placeholder="Username (optional)" aria-label="Proxy username" autoComplete="off" />
                       <input value={proxyPassword} onChange={(event) => setProxyPassword(event.target.value)} type="password" placeholder="Password (optional)" aria-label="Proxy password" autoComplete="new-password" />
                     </div>}
-                    <p>{proxyMode === "socks5" ? "SOCKS5 supports optional username/password authentication." : proxyMode === "http" ? "HTTP proxy supports optional Basic authentication and HTTPS website traffic through CONNECT." : "Direct network connection; no proxy is used."}{proxyMode !== "none" && (proxyUsername || proxyPassword) ? " Credentials stay in memory and are not saved or logged. Proxy credentials are not encrypted in transit; use a trusted network." : ""}{activeAvd?.status === "running" && proxyMode !== "none" ? " Stop and reopen the running AVD to apply proxy changes." : ""}</p>
-                    <button className="secondary-button proxy-test-button" onClick={() => void testConfiguredProxy()} disabled={proxyTesting || launching || proxyMode === "none" || !proxyHost.trim() || !proxyPort.trim()}>
+                    <p>{proxyMode === "system" ? "Uses the system proxy resolved for HTTPS traffic." : proxyMode === "socks5" ? "SOCKS5 supports optional username/password authentication." : proxyMode === "http" ? "HTTP proxy supports optional Basic authentication and HTTPS website traffic through CONNECT." : "Direct network connection; no proxy is used."}{proxyMode !== "none" && proxyMode !== "system" && (proxyUsername || proxyPassword) ? " Credentials stay in memory and are not saved or logged. Proxy credentials are not encrypted in transit; use a trusted network." : ""}{activeAvd?.status === "running" && proxyMode !== "none" ? " Connect the proxy now or restart the AVD to apply it." : ""}</p>
+                    <button className="secondary-button proxy-test-button" onClick={() => void connectConfiguredProxy()} disabled={proxyConnecting || proxyTesting || launching || activeAvd?.status !== "running" || proxyMode === "none" || (proxyMode !== "system" && (!proxyHost.trim() || !proxyPort.trim()))}>
+                      {proxyConnecting ? <><LoaderCircle size={13} className="spin" /> Connecting proxy</> : <><Wifi size={13} /> Connect Proxy</>}
+                    </button>
+                    <button className="secondary-button proxy-test-button" onClick={() => void testConfiguredProxy()} disabled={proxyTesting || proxyConnecting || launching || proxyMode === "none" || (proxyMode !== "system" && (!proxyHost.trim() || !proxyPort.trim()))}>
                       {proxyTesting ? <><LoaderCircle size={13} className="spin" /> Testing proxy</> : <><Wifi size={13} /> Test proxy connection</>}
                     </button>
                     {proxyTestResult && <p className={`proxy-test-result${proxyTestResult.ok ? " good" : " bad"}`} role="status">{proxyTestResult.message}</p>}
                   </div>
                   <div className="gps-setting">
-                    <div className="gps-setting-head"><MapPin size={14} /><span><strong>Emulator GPS location</strong><small>{activeAvd?.status === "running" ? "Send a mock GPS fix to the running AVD" : "Start an emulator to set its GPS location"}</small></span></div>
+                    <div className="gps-setting-head"><MapPin size={14} /><span><strong>Emulator GPS location</strong><small>{activeAvd?.status === "running" ? "Set now or apply again when the emulator starts" : "Coordinates will be applied when the emulator starts"}</small></span></div>
                     <div className="gps-fields">
-                      <input value={gpsLatitude} onChange={(event) => setGpsLatitude(event.target.value)} type="number" min="-90" max="90" step="any" placeholder="Latitude (-90 to 90)" aria-label="GPS latitude" disabled={activeAvd?.status !== "running" || gpsBusy} />
-                      <input value={gpsLongitude} onChange={(event) => setGpsLongitude(event.target.value)} type="number" min="-180" max="180" step="any" placeholder="Longitude (-180 to 180)" aria-label="GPS longitude" disabled={activeAvd?.status !== "running" || gpsBusy} />
+                      <input value={gpsLatitude} onChange={(event) => setGpsLatitude(event.target.value)} type="number" min="-90" max="90" step="any" placeholder="Latitude (-90 to 90)" aria-label="GPS latitude" disabled={gpsBusy} />
+                      <input value={gpsLongitude} onChange={(event) => setGpsLongitude(event.target.value)} type="number" min="-180" max="180" step="any" placeholder="Longitude (-180 to 180)" aria-label="GPS longitude" disabled={gpsBusy} />
                     </div>
                     <button className="secondary-button gps-apply-button" onClick={() => void setEmulatorGpsLocation()} disabled={activeAvd?.status !== "running" || gpsBusy || emulatorStarting}>
-                      {gpsBusy ? <><LoaderCircle size={13} className="spin" /> Sending location</> : <><MapPin size={13} /> Set emulator location</>}
+                      {gpsBusy ? <><LoaderCircle size={13} className="spin" /> Connecting coordinator</> : <><MapPin size={13} /> Connect Coordinator</>}
                     </button>
                     <p className="gps-note">Uses the emulator GPS provider. Android location must be enabled, and apps need location permission to read it.</p>
                     {gpsResult && <p className={`gps-result${gpsResult.startsWith("Location sent:") ? " good" : " bad"}`} role="status">{gpsResult}</p>}
@@ -873,6 +937,54 @@ function App() {
                   <li>Press <strong>Refresh</strong> above. Choose the physical phone and install your APK.</li>
                 </ol>
                 <div className="phone-setup-note"><AlertCircle size={15} /> No phone is currently connected. You’ll need access to a physical Galaxy; this app cannot emulate Samsung One UI.</div>
+              </section>
+            </div>
+          )}
+
+          {page === "ios" && (
+            <div className="subpage ios-simulator-page">
+              <div className="eyebrow"><Smartphone size={13} /> XCODE IOS SIMULATORS</div>
+              <h1>iPhone <span>Simulator.</span></h1>
+              <p className="subpage-intro">Boot and shut down iPhone simulators installed with Xcode on this Mac.</p>
+              {error && <div className="error-banner" role="alert"><AlertCircle size={17} /><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss error"><X size={16} /></button></div>}
+              <div className="phone-connect-card">
+                <div className="phone-connect-header">
+                  <div className="lower-icon mint"><Smartphone size={17} /></div>
+                  <div><strong>Available iPhone simulators</strong><span>{iosSimulators.message}</span></div>
+                  <button className="secondary-button" onClick={() => void refresh()} disabled={refreshing}><RefreshCw size={14} className={refreshing ? "spin" : ""} /> Refresh</button>
+                </div>
+                {iosSimulators.devices.length ? (
+                  <div className="ios-simulator-list">{iosSimulators.devices.map((simulator) => {
+                    const isBooted = simulator.state === "Booted";
+                    const busy = iosBusyUdid === simulator.udid;
+                    return (
+                      <article key={simulator.udid} className="ios-simulator-card">
+                        <div className="physical-device-icon"><Smartphone size={21} /></div>
+                        <span className="physical-device-details"><strong>{simulator.name}</strong><small>{simulator.runtime} · {simulator.udid}</small></span>
+                        <span className={`avd-status ${isBooted ? "running" : ""}`}><span />{simulator.state.toLowerCase()}</span>
+                        {isBooted
+                          ? <button className="secondary-button small" onClick={() => void changeIosSimulatorState(simulator.udid, "shutdown")} disabled={Boolean(iosBusyUdid)}><Power size={13} /> SHUT DOWN</button>
+                          : <button className="primary-button small" onClick={() => void changeIosSimulatorState(simulator.udid, "boot")} disabled={Boolean(iosBusyUdid)}>{busy ? <LoaderCircle size={13} className="spin" /> : <Play size={13} fill="currentColor" />} BOOT</button>}
+                      </article>
+                    );
+                  })}</div>
+                ) : (
+                  <div className="phone-empty-state">
+                    <Smartphone size={25} />
+                    <strong>{iosSimulators.available ? "No iPhone simulators installed" : "Xcode Simulator is unavailable"}</strong>
+                    <span>{iosSimulators.available
+                      ? "In Xcode, open Settings → Platforms and install an iOS Simulator runtime, then refresh this list."
+                      : iosSimulators.message}</span>
+                  </div>
+                )}
+              </div>
+              <section className="phone-setup ios-simulator-setup">
+                <div className="panel-title"><span className="step-count">01</span><div><h2>One-time Xcode setup</h2><p>Apple’s iOS Simulator is provided by Xcode</p></div></div>
+                <ol>
+                  <li>Install Xcode on this Mac and open it once to finish its initial setup.</li>
+                  <li>In Xcode, open <strong>Settings → Platforms</strong> and install an iOS Simulator runtime.</li>
+                  <li>Refresh the list above, then press <strong>Boot</strong> beside an iPhone model to open it in Simulator.</li>
+                </ol>
               </section>
             </div>
           )}

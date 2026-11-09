@@ -1,9 +1,10 @@
 export type Orientation = "Portrait" | "Landscape";
 export type GraphicsMode = "auto" | "host" | "swiftshader_indirect" | "angle_indirect" | "guest";
-export type ProxyMode = "none" | "http" | "socks5";
+export type ProxyMode = "none" | "system" | "http" | "socks5";
 
 export type EmulatorProxy =
   | { mode: "none" }
+  | { mode: "system" }
   | { mode: "http" | "socks5"; host: string; port: number; username?: string; password?: string };
 
 export interface DeviceChoice {
@@ -68,6 +69,19 @@ export interface ConnectedDevice {
   isEmulator?: boolean;
 }
 
+export interface IosSimulator {
+  udid: string;
+  name: string;
+  runtime: string;
+  state: string;
+}
+
+export interface IosSimulatorStatus {
+  available: boolean;
+  message: string;
+  devices: IosSimulator[];
+}
+
 export interface ApkSelection {
   id: string;
   name: string;
@@ -86,6 +100,7 @@ export interface LaunchOptions {
   graphics: GraphicsMode;
   charging: boolean;
   proxy: EmulatorProxy;
+  location?: { latitude: number; longitude: number };
 }
 
 export interface CreateAvdOptions {
@@ -106,9 +121,13 @@ export interface EmulatorApi {
   getSdkStatus(): Promise<SdkStatus>;
   listAvds(): Promise<AvdInfo[]>;
   listConnectedDevices(): Promise<ConnectedDevice[]>;
+  getIosSimulatorStatus(): Promise<IosSimulatorStatus>;
+  bootIosSimulator(udid: string): Promise<void>;
+  shutdownIosSimulator(udid: string): Promise<void>;
   listSystemImages(): Promise<SystemImage[]>;
   listDeviceProfiles(): Promise<DeviceProfile[]>;
   launch(options: LaunchOptions): Promise<void>;
+  connectProxy(avdName: string, proxy: EmulatorProxy): Promise<void>;
   testProxy(proxy: EmulatorProxy): Promise<void>;
   setEmulatorLocation(avdName: string, latitude: number, longitude: number): Promise<void>;
   setCharging(avdName: string, charging: boolean): Promise<void>;

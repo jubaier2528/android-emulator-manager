@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, session, shell, type OpenDialogOptions } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -14,6 +14,8 @@ import type {
   EmulatorProxy,
   EmulatorLog,
   GraphicsMode,
+  IosSimulator,
+  IosSimulatorStatus,
   LaunchOptions,
   Orientation,
   SdkStatus,
@@ -27,6 +29,7 @@ const runningProcesses = new Map<string, ChildProcess>();
 const apkSelections = new Map<string, string>();
 const mirrorProcesses = new Map<string, ChildProcess>();
 const socksBridges = new Map<string, { close: () => void }>();
+const adbProxyAvds = new Set<string>();
 let mainWindow: BrowserWindow | null = null;
 let sdkStatus: SdkStatus | undefined;
 
@@ -430,6 +433,83 @@ async function listConnectedDevices(): Promise<ConnectedDevice[]> {
   return devices;
 }
 
+async function getIosSimulatorStatus(): Promise<IosSimulatorStatus> {
+  if (process.platform !== "darwin") {
+    return { available: false, message: "iPhone Simulator management is available on macOS only.", devices: [] };
+  }
+  const xcrunPath = await findOnPath("xcrun");
+  if (!xcrunPath) {
+    return { available: false, message: "Xcode Command Line Tools were not found. Install Xcode to use iPhone Simulator.", devices: [] };
+  }
+  try {
+    const output = await run(xcrunPath, ["simctl", "list", "devices", "--json"]);
+    const result = JSON.parse(output) as { devices?: Record<string, Array<{
+      udid?: unknown;
+      name?: unknown;
+      state?: unknown;
+      isAvailable?: unknown;
+    }>> };
+    const devices: IosSimulator[] = Object.entries(result.devices ?? {})
+      .filter(([runtime]) => runtime.startsWith("com.apple.CoreSimulator.SimRuntime.iOS-"))
+      .flatMap(([runtime, entries]) => entries.flatMap((device) => {
+        if (device.isAvailable === false || typeof device.udid !== "string" ||
+          typeof device.name !== "string" || !device.name.toLowerCase().includes("iphone")) return [];
+        const runtimeVersion = runtime.match(/\.iOS-(\d+)-(\d+)/);
+        return [{
+          udid: device.udid,
+          name: device.name,
+          runtime: runtimeVersion ? `iOS ${runtimeVersion[1]}.${runtimeVersion[2]}` : runtime,
+          state: typeof device.state === "string" ? device.state : "Unknown"
+        }];
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    return {
+      available: true,
+      message: devices.length
+        ? `${devices.length} iPhone simulator${devices.length === 1 ? "" : "s"} available through Xcode.`
+        : "Xcode is ready, but no iPhone simulators are installed. Install an iOS Simulator runtime in Xcode > Settings > Platforms.",
+      devices
+    };
+  } catch (error) {
+    return {
+      available: false,
+      message: error instanceof Error ? error.message : String(error),
+      devices: []
+    };
+  }
+}
+
+async function requireIosSimulator(udid: unknown): Promise<{ simulator: IosSimulator; xcrunPath: string }> {
+  if (process.platform !== "darwin") throw new Error("iPhone Simulator management is available on macOS only.");
+  if (typeof udid !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(udid)) {
+    throw new Error("Choose a valid iPhone simulator.");
+  }
+  const status = await getIosSimulatorStatus();
+  if (!status.available) throw new Error(status.message);
+  const simulator = status.devices.find((device) => device.udid === udid);
+  if (!simulator) throw new Error("That iPhone simulator is no longer available. Refresh the simulator list.");
+  const xcrunPath = await findOnPath("xcrun");
+  if (!xcrunPath) throw new Error("Xcode Command Line Tools were not found. Install Xcode to use iPhone Simulator.");
+  return { simulator, xcrunPath };
+}
+
+async function bootIosSimulator(udid: unknown): Promise<void> {
+  const { simulator, xcrunPath } = await requireIosSimulator(udid);
+  if (simulator.state !== "Booted") {
+    await run(xcrunPath, ["simctl", "boot", simulator.udid]);
+  }
+  await run(xcrunPath, ["simctl", "bootstatus", simulator.udid, "-b"], 120_000);
+  await run("/usr/bin/open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", simulator.udid]);
+  log("success", `${simulator.name} is running in iPhone Simulator.`);
+}
+
+async function shutdownIosSimulator(udid: unknown): Promise<void> {
+  const { simulator, xcrunPath } = await requireIosSimulator(udid);
+  if (simulator.state !== "Booted") throw new Error(`${simulator.name} is not running.`);
+  await run(xcrunPath, ["simctl", "shutdown", simulator.udid]);
+  log("success", `${simulator.name} was shut down.`);
+}
+
 function validatePhysicalSerial(value: unknown): string {
   if (typeof value !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(value) || value.startsWith("emulator-")) {
     throw new Error("Select a connected physical Android phone.");
@@ -530,6 +610,15 @@ function validateLaunchOptions(value: unknown): LaunchOptions {
   if (!orientations.includes(options.orientation as Orientation)) throw new Error("Choose a supported orientation.");
   if (!graphicsModes.includes(options.graphics as GraphicsMode)) throw new Error("Choose a supported graphics mode.");
   if (typeof options.charging !== "boolean") throw new Error("Choose whether the emulator should be charging.");
+  if (options.location !== undefined && (
+    !options.location || typeof options.location !== "object" ||
+    typeof options.location.latitude !== "number" || !Number.isFinite(options.location.latitude) ||
+    options.location.latitude < -90 || options.location.latitude > 90 ||
+    typeof options.location.longitude !== "number" || !Number.isFinite(options.location.longitude) ||
+    options.location.longitude < -180 || options.location.longitude > 180
+  )) {
+    throw new Error("Latitude must be between -90 and 90 degrees and longitude between -180 and 180 degrees.");
+  }
   options.proxy = validateEmulatorProxy(options.proxy);
   return options as LaunchOptions;
 }
@@ -539,6 +628,8 @@ function validateEmulatorProxy(value: unknown): EmulatorProxy {
   const proxy = value as Partial<EmulatorProxy>;
   if (proxy.mode === "none") {
     return { mode: "none" };
+  } else if (proxy.mode === "system") {
+    return { mode: "system" };
   } else if (proxy.mode === "http" || proxy.mode === "socks5") {
     if (typeof proxy.host !== "string" || !isValidProxyHost(proxy.host)) {
       throw new Error("Enter a valid proxy host name or IP address.");
@@ -578,6 +669,38 @@ function isValidProxyHost(value: string): boolean {
   return isIP(host) !== 0 || /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?$/.test(host);
 }
 
+async function resolveSystemProxy(): Promise<Extract<EmulatorProxy, { mode: "http" | "socks5" }>> {
+  const resolution = await session.defaultSession.resolveProxy("https://example.com/");
+  const route = resolution.split(";").map((item) => item.trim())
+    .find((item) => /^(PROXY|HTTP|SOCKS5)\s/i.test(item));
+  if (!route) {
+    throw new Error("No HTTP or SOCKS5 system proxy is configured for internet traffic.");
+  }
+  const match = route.match(/^(PROXY|HTTP|SOCKS5)\s+(.+)$/i);
+  if (!match) throw new Error("The system proxy uses an unsupported protocol. Choose HTTP or SOCKS5.");
+  const mode = match[1].toUpperCase() === "SOCKS5" ? "socks5" : "http";
+  let endpoint: URL;
+  try {
+    endpoint = new URL(`${mode === "socks5" ? "socks5" : "http"}://${match[2]}`);
+  } catch {
+    throw new Error("The system proxy returned an invalid host or port.");
+  }
+  const host = endpoint.hostname.replace(/^\[|\]$/g, "");
+  const port = Number(endpoint.port || (mode === "socks5" ? 1080 : 80));
+  if (!isValidProxyHost(host) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("The system proxy returned an invalid host or port.");
+  }
+  return {
+    mode,
+    host,
+    port,
+    ...(endpoint.username ? {
+      username: decodeURIComponent(endpoint.username),
+      password: decodeURIComponent(endpoint.password)
+    } : {})
+  };
+}
+
 function catalogVendorFromId(id: string): string | undefined {
   if (id.startsWith("pixel-")) return "google";
   if (id.startsWith("galaxy-")) return "samsung";
@@ -596,6 +719,65 @@ async function applyOrientation(serial: string, orientation: Orientation): Promi
 async function applyChargingState(serial: string, charging: boolean): Promise<void> {
   if (!/^emulator-\d+$/.test(serial)) throw new Error("Invalid emulator serial.");
   await run(requireTool("adbPath"), ["-s", serial, "emu", "power", "ac", charging ? "on" : "off"]);
+}
+
+async function waitForAndroidBoot(serial: string): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 60_000) {
+    const bootCompleted = await run(requireTool("adbPath"), ["-s", serial, "shell", "getprop", "sys.boot_completed"], 5_000).catch(() => "");
+    if (bootCompleted.trim() === "1") return;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error("Android did not finish booting within 60 seconds.");
+}
+
+async function applyGpsLocation(serial: string, latitude: number, longitude: number): Promise<void> {
+  if (!/^emulator-\d+$/.test(serial)) throw new Error("Invalid emulator serial.");
+  await run(requireTool("adbPath"), ["-s", serial, "emu", "geo", "fix", String(longitude), String(latitude)]);
+}
+
+async function applyRunningEmulatorProxy(avdName: string, serial: string, proxy: EmulatorProxy): Promise<void> {
+  const existingBridge = socksBridges.get(avdName);
+  if (proxy.mode === "none") {
+    if (adbProxyAvds.has(avdName)) {
+      await run(requireTool("adbPath"), ["-s", serial, "shell", "settings", "put", "global", "http_proxy", ":0"]);
+      adbProxyAvds.delete(avdName);
+    }
+    existingBridge?.close();
+    socksBridges.delete(avdName);
+    return;
+  }
+  if (proxy.mode !== "http" && proxy.mode !== "socks5") {
+    throw new Error("Resolve the system proxy before applying it to an emulator.");
+  }
+
+  const bridge = await createEmulatorProxyBridge(proxy);
+  try {
+    await run(requireTool("adbPath"), [
+      "-s", serial, "shell", "settings", "put", "global", "http_proxy", `10.0.2.2:${bridge.port}`
+    ]);
+  } catch (error) {
+    bridge.close();
+    throw error;
+  }
+  existingBridge?.close();
+  socksBridges.set(avdName, bridge);
+  adbProxyAvds.add(avdName);
+}
+
+async function connectEmulatorProxy(value: unknown): Promise<void> {
+  if (!value || typeof value !== "object") throw new Error("Invalid emulator proxy request.");
+  const options = value as { avdName?: unknown; proxy?: unknown };
+  if (typeof options.avdName !== "string" || !safeAvdName(options.avdName)) {
+    throw new Error("Choose a valid AVD name.");
+  }
+  const requestedProxy = validateEmulatorProxy(options.proxy);
+  if (requestedProxy.mode === "none") throw new Error("Choose a system, HTTP, or SOCKS5 proxy first.");
+  const proxy = requestedProxy.mode === "system" ? await resolveSystemProxy() : requestedProxy;
+  const serial = (await listRunningAvds()).get(options.avdName);
+  if (!serial) throw new Error(`${options.avdName} is not running. Start the AVD before connecting its proxy.`);
+  await applyRunningEmulatorProxy(options.avdName, serial, proxy);
+  log("success", `${options.avdName} proxy connected through ADB.`);
 }
 
 async function setCharging(value: unknown): Promise<void> {
@@ -625,10 +807,7 @@ async function setEmulatorLocation(value: unknown): Promise<void> {
   }
   const serial = (await listRunningAvds()).get(options.avdName);
   if (!serial) throw new Error(`${options.avdName} is not running.`);
-  await run(requireTool("adbPath"), [
-    "-s", serial, "emu", "geo", "fix",
-    String(options.longitude), String(options.latitude)
-  ]);
+  await applyGpsLocation(serial, options.latitude, options.longitude);
   log("success", `${options.avdName} emulator location updated.`);
 }
 
@@ -638,6 +817,7 @@ async function launch(options: LaunchOptions): Promise<void> {
   if (!selectedAvd) {
     throw new Error(`AVD "${options.avdName}" is not installed. Create it from an available device profile and system image first.`);
   }
+  const proxy = options.proxy.mode === "system" ? await resolveSystemProxy() : options.proxy;
   const expectedVendor = catalogVendorFromId(options.device.id);
   const normalizeName = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
   if (expectedVendor && (
@@ -655,12 +835,11 @@ async function launch(options: LaunchOptions): Promise<void> {
   const running = await listRunningAvds();
   const currentSerial = running.get(options.avdName);
   if (currentSerial) {
-    if (options.proxy.mode !== "none") {
-      throw new Error("Proxy settings apply only when an emulator starts. Stop this AVD, then open it again to apply the selected proxy.");
-    }
+    await applyRunningEmulatorProxy(options.avdName, currentSerial, proxy);
     await applyOrientation(currentSerial, options.orientation);
     await applyChargingState(currentSerial, options.charging);
-    log("info", `${options.avdName} is already running; applied ${options.orientation.toLowerCase()} orientation and ${options.charging ? "enabled" : "disabled"} AC charging.`);
+    if (options.location) await applyGpsLocation(currentSerial, options.location.latitude, options.location.longitude);
+    log("success", `${options.avdName} is already running; applied its proxy, ${options.orientation.toLowerCase()} orientation, and ${options.charging ? "enabled" : "disabled"} AC charging.`);
     return;
   }
   const activeProcess = runningProcesses.get(options.avdName);
@@ -670,10 +849,10 @@ async function launch(options: LaunchOptions): Promise<void> {
   }
   const executable = requireTool("emulatorPath");
   const args = ["-avd", options.avdName, "-gpu", options.graphics];
-  if (options.proxy.mode !== "none") {
-    const bridge = await createEmulatorProxyBridge(options.proxy);
+  if (proxy.mode !== "none") {
+    const bridge = await createEmulatorProxyBridge(proxy);
     socksBridges.set(options.avdName, bridge);
-    args.push("-http-proxy", `http://127.0.0.1:${bridge.port}`);
+    args.push("-http-proxy", `http://10.0.2.2:${bridge.port}`);
   }
   let child: ChildProcess;
   try {
@@ -727,6 +906,15 @@ async function launch(options: LaunchOptions): Promise<void> {
   } catch (error) {
     log("warning", `Emulator started, but AC charging could not be changed: ${error instanceof Error ? error.message : String(error)}`);
   }
+  if (options.location) {
+    try {
+      await waitForAndroidBoot(serial);
+      await applyGpsLocation(serial, options.location.latitude, options.location.longitude);
+      log("success", `${options.avdName} emulator location updated.`);
+    } catch (error) {
+      log("warning", `Emulator started, but GPS location could not be applied yet: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   log("success", `${options.device.name} is running as ${serial}.`);
 }
 
@@ -735,6 +923,10 @@ async function stop(avdName: string): Promise<void> {
   const serial = (await listRunningAvds()).get(avdName);
   const startingProcess = runningProcesses.get(avdName);
   if (serial) {
+    if (adbProxyAvds.has(avdName)) {
+      await run(requireTool("adbPath"), ["-s", serial, "shell", "settings", "put", "global", "http_proxy", ":0"]).catch(() => "");
+      adbProxyAvds.delete(avdName);
+    }
     await run(requireTool("adbPath"), ["-s", serial, "emu", "kill"]);
   } else if (startingProcess && startingProcess.exitCode === null) {
     startingProcess.kill();
@@ -749,6 +941,8 @@ async function stop(avdName: string): Promise<void> {
   if ((await listRunningAvds()).has(avdName) || runningProcesses.get(avdName)?.exitCode === null) {
     throw new Error(`${avdName} did not stop within 15 seconds.`);
   }
+  socksBridges.get(avdName)?.close();
+  socksBridges.delete(avdName);
   log("success", `${avdName} stopped.`);
 }
 
@@ -851,14 +1045,19 @@ function registerIpc(): void {
   ipcMain.handle("sdk:status", async () => getSdk());
   ipcMain.handle("avd:list", async () => listAvds());
   ipcMain.handle("adb:devices", async () => listConnectedDevices());
+  ipcMain.handle("ios-simulator:status", async () => getIosSimulatorStatus());
+  ipcMain.handle("ios-simulator:boot", async (_event, value: unknown) => bootIosSimulator(value));
+  ipcMain.handle("ios-simulator:shutdown", async (_event, value: unknown) => shutdownIosSimulator(value));
   ipcMain.handle("sdk:images", async () => listSystemImages());
   ipcMain.handle("sdk:profiles", async () => listDeviceProfiles());
   ipcMain.handle("emulator:launch", async (_event, value: unknown) => {
     await launch(validateLaunchOptions(value));
   });
+  ipcMain.handle("emulator:proxy-apply", async (_event, value: unknown) => connectEmulatorProxy(value));
   ipcMain.handle("emulator:proxy-test", async (_event, value: unknown) => {
-    const proxy = validateEmulatorProxy(value);
-    if (proxy.mode === "none") throw new Error("Choose HTTP proxy or SOCKS5 and enter its server details first.");
+    const requestedProxy = validateEmulatorProxy(value);
+    if (requestedProxy.mode === "none") throw new Error("Choose a system proxy, HTTP proxy, or SOCKS5 and enter its server details first.");
+    const proxy = requestedProxy.mode === "system" ? await resolveSystemProxy() : requestedProxy;
     await testEmulatorProxyConnection(proxy);
     log("success", "Proxy connection and HTTPS tunnel test passed.");
   });

@@ -67,8 +67,13 @@ Electron inherits environment variables from the process that starts it. If you 
 - Sets mock GPS coordinates on a running emulator through the Android Emulator GPS provider; apps can read the location when device location is enabled and they have the necessary location permissions.
 - Creates AVDs only from exact manufacturer profiles returned by `avdmanager list device` and SDK-installed images with matching vendor and OS-flavor metadata. Samsung images must identify One UI, Xiaomi images HyperOS/MIUI, and OnePlus images OxygenOS. It refuses to pass off stock Android or a Pixel profile as another manufacturer's device/OS.
 - Keeps an activity log and displays SDK, AVD, running emulator, and ADB-connected device status.
+- On macOS, discovers installed iPhone simulators from Xcode and lets you boot them in Apple's Simulator app or shut them down.
 - Includes a Samsung Remote Test Lab launchpad that opens Samsung's official service and explains its sign-in/device-selection flow. Samsung handles the remote session on its own website; this app does not embed or control it.
 - Includes a **Local phones** workspace for physical Android devices connected over USB/ADB. It can install a user-selected APK, launch an app by package ID, and open a local `scrcpy` mirror when installed.
+
+## iPhone Simulator (macOS)
+
+Install Xcode, open it once to finish setup, then install an iOS Simulator runtime from **Xcode → Settings → Platforms**. Open **iPhone Simulator** in this app and refresh to discover available iPhone models. Choose **Boot** to start a simulator in Apple's Simulator app or **Shut down** to stop it. Android SDK setup is not required for this feature.
 
 ## Samsung Remote Test Lab
 

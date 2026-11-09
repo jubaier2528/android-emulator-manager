@@ -11,7 +11,7 @@ interface ProxyCredentials {
 }
 
 export interface ProxyBridgeOptions extends ProxyCredentials {
-  mode: Exclude<ProxyMode, "none">;
+  mode: Exclude<ProxyMode, "none" | "system">;
   host: string;
   port: number;
 }

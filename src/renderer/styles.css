@@ -305,6 +305,13 @@ h1 span { color: #b99afd; }
 .physical-device-details strong, .physical-device-details small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .physical-device-details strong { color: #d7d8df; font-size: 10px; font-weight: 500; }
 .physical-device-details small { margin-top: 4px; color: #858a97; font-family: var(--font-mono); font-size: 8px; }
+.ios-simulator-page { max-width: 1120px; }
+.ios-simulator-page .subpage-intro { max-width: 760px; line-height: 1.65; }
+.ios-simulator-list { display: grid; gap: 8px; margin-top: 15px; }
+.ios-simulator-card { display: flex; min-width: 0; align-items: center; gap: 11px; padding: 11px; border: 1px solid #2d3039; border-radius: 7px; background: #1d1f25; }
+.ios-simulator-card .physical-device-details { flex: 1; }
+.ios-simulator-card .avd-status.running > span { background: #5bd0a4; }
+.ios-simulator-setup ol { padding-bottom: 4px; }
 .phone-empty-state { display: flex; min-height: 135px; flex-direction: column; align-items: center; justify-content: center; gap: 8px; margin-top: 13px; border: 1px dashed #353741; border-radius: 7px; color: #8d929e; text-align: center; }
 .phone-empty-state > svg { color: #a48bc5; }
 .phone-empty-state strong { color: #cfd0d8; font-size: 11px; font-weight: 500; }
