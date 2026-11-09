@@ -1,5 +1,10 @@
 export type Orientation = "Portrait" | "Landscape";
 export type GraphicsMode = "auto" | "host" | "swiftshader_indirect" | "angle_indirect" | "guest";
+export type ProxyMode = "none" | "http" | "socks5";
+
+export type EmulatorProxy =
+  | { mode: "none" }
+  | { mode: "http" | "socks5"; host: string; port: number; username?: string; password?: string };
 
 export interface DeviceChoice {
   id: string;
@@ -80,6 +85,7 @@ export interface LaunchOptions {
   orientation: Orientation;
   graphics: GraphicsMode;
   charging: boolean;
+  proxy: EmulatorProxy;
 }
 
 export interface CreateAvdOptions {
@@ -103,6 +109,8 @@ export interface EmulatorApi {
   listSystemImages(): Promise<SystemImage[]>;
   listDeviceProfiles(): Promise<DeviceProfile[]>;
   launch(options: LaunchOptions): Promise<void>;
+  testProxy(proxy: EmulatorProxy): Promise<void>;
+  setEmulatorLocation(avdName: string, latitude: number, longitude: number): Promise<void>;
   setCharging(avdName: string, charging: boolean): Promise<void>;
   stop(avdName: string): Promise<void>;
   createAvd(options: CreateAvdOptions): Promise<void>;

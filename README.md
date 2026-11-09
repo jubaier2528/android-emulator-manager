@@ -62,6 +62,9 @@ Electron inherits environment variables from the process that starts it. If you 
 - Shows resolution, RAM, image API, configured display size (derived from the AVD's configured pixel dimensions and density), and hardware profile only when present in SDK configuration.
 - Starts an installed AVD with `emulator -avd <name> -gpu <mode>`, applies portrait/landscape rotation and the selected AC charging state after startup, and stops it with `adb -s <serial> emu kill`.
 - Lets you turn emulator AC charging on or off before launch, or apply the change immediately to a running emulator through the Android Emulator console.
+- Lets you launch an AVD through an HTTP proxy (for HTTP and HTTPS website traffic using CONNECT) or a SOCKS5 proxy. Both support optional username/password authentication. A temporary loopback HTTP bridge keeps credentials out of emulator command-line arguments; SOCKS5 is bridged because the Android Emulator accepts HTTP proxies. Proxy changes require stopping and reopening an already-running AVD.
+- Tests configured HTTP/SOCKS5 proxy connectivity and authentication by establishing an HTTPS tunnel without sending browsing traffic.
+- Sets mock GPS coordinates on a running emulator through the Android Emulator GPS provider; apps can read the location when device location is enabled and they have the necessary location permissions.
 - Creates AVDs only from exact manufacturer profiles returned by `avdmanager list device` and SDK-installed images with matching vendor and OS-flavor metadata. Samsung images must identify One UI, Xiaomi images HyperOS/MIUI, and OnePlus images OxygenOS. It refuses to pass off stock Android or a Pixel profile as another manufacturer's device/OS.
 - Keeps an activity log and displays SDK, AVD, running emulator, and ADB-connected device status.
 - Includes a Samsung Remote Test Lab launchpad that opens Samsung's official service and explains its sign-in/device-selection flow. Samsung handles the remote session on its own website; this app does not embed or control it.
@@ -102,6 +105,16 @@ AVD creation requires Android SDK Command-line Tools, an exact manufacturer hard
 ### Emulator launch fails or hangs
 
 Check the in-app Logs & diagnostics page. Try **Automatic** or **Software (SwiftShader)** graphics, confirm the selected AVD starts with `emulator -avd <AVD_NAME>` in the integrated terminal, and check that virtualization is supported and enough memory/disk space is available. The app reports startup after the emulator registers with ADB; first boot can take longer than usual.
+
+### Emulator proxy does not connect
+
+Set the proxy type, host, and port under **Overview → Configuration** before opening the AVD. If required, enter both the username and password. HTTP proxy mode supports HTTP and HTTPS website connections through the configured HTTP proxy (HTTPS uses CONNECT; this does not mean a TLS-wrapped proxy endpoint). SOCKS5 mode uses the SOCKS5 username/password method when credentials are entered. A temporary loopback HTTP bridge keeps proxy credentials out of emulator command-line arguments. Host and port are kept in local preferences; username and password remain in memory only and are not logged or saved. Proxy credentials are not encrypted in transit, so use a trusted network. Confirm the proxy is reachable from this computer and stop/reopen an already-running AVD after changing proxy settings.
+
+Use **Test proxy connection** under **Overview → Configuration** to check the proxy address, authentication, and ability to open an HTTPS tunnel. It connects through the configured proxy to `example.com:443` and does not request or display your public IP address.
+
+### Set emulator GPS coordinates
+
+Start and select an AVD, enter latitude (-90 to 90) and longitude (-180 to 180) under **Emulator GPS location**, then choose **Set emulator location**. The coordinates are delivered to the running emulator as a GPS fix. Enable Location on Android and grant the app under test location permission; Android does not guarantee every app will use location without those conditions. This setting targets emulators only, not physical phones.
 
 ### Emulator is running but not listed as connected
 

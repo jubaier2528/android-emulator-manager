@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } fr
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -10,6 +11,7 @@ import type {
   ConnectedDevice,
   CreateAvdOptions,
   DeviceProfile,
+  EmulatorProxy,
   EmulatorLog,
   GraphicsMode,
   LaunchOptions,
@@ -17,12 +19,14 @@ import type {
   SdkStatus,
   SystemImage
 } from "../shared";
+import { createEmulatorProxyBridge, testEmulatorProxyConnection } from "./proxyHttpBridge";
 
 const graphicsModes: GraphicsMode[] = ["auto", "host", "swiftshader_indirect", "angle_indirect", "guest"];
 const orientations: Orientation[] = ["Portrait", "Landscape"];
 const runningProcesses = new Map<string, ChildProcess>();
 const apkSelections = new Map<string, string>();
 const mirrorProcesses = new Map<string, ChildProcess>();
+const socksBridges = new Map<string, { close: () => void }>();
 let mainWindow: BrowserWindow | null = null;
 let sdkStatus: SdkStatus | undefined;
 
@@ -526,7 +530,52 @@ function validateLaunchOptions(value: unknown): LaunchOptions {
   if (!orientations.includes(options.orientation as Orientation)) throw new Error("Choose a supported orientation.");
   if (!graphicsModes.includes(options.graphics as GraphicsMode)) throw new Error("Choose a supported graphics mode.");
   if (typeof options.charging !== "boolean") throw new Error("Choose whether the emulator should be charging.");
+  options.proxy = validateEmulatorProxy(options.proxy);
   return options as LaunchOptions;
+}
+
+function validateEmulatorProxy(value: unknown): EmulatorProxy {
+  if (!value || typeof value !== "object") throw new Error("Choose a valid emulator proxy configuration.");
+  const proxy = value as Partial<EmulatorProxy>;
+  if (proxy.mode === "none") {
+    return { mode: "none" };
+  } else if (proxy.mode === "http" || proxy.mode === "socks5") {
+    if (typeof proxy.host !== "string" || !isValidProxyHost(proxy.host)) {
+      throw new Error("Enter a valid proxy host name or IP address.");
+    }
+    if (typeof proxy.port !== "number" || !Number.isInteger(proxy.port) || proxy.port < 1 || proxy.port > 65535) {
+      throw new Error("Proxy port must be a whole number between 1 and 65535.");
+    }
+    if ((proxy.username === undefined) !== (proxy.password === undefined)) {
+      throw new Error("Enter both a proxy username and password, or leave both blank.");
+    }
+    if (proxy.username !== undefined && (
+      typeof proxy.username !== "string" ||
+      typeof proxy.password !== "string" ||
+      !proxy.username ||
+      proxy.username.length > 255 ||
+      proxy.password.length > 255 ||
+      /[\r\n:]/.test(proxy.username) ||
+      /[\r\n]/.test(proxy.password)
+    )) {
+      throw new Error("Proxy credentials are invalid. Usernames and passwords must be 1–255 characters and cannot contain line breaks.");
+    }
+    return {
+      mode: proxy.mode,
+      host: proxy.host.trim().replace(/^\[|\]$/g, ""),
+      port: proxy.port,
+      ...(proxy.username !== undefined && proxy.password !== undefined
+        ? { username: proxy.username, password: proxy.password }
+        : {})
+    };
+  }
+  throw new Error("Choose No proxy, HTTP/HTTPS, or SOCKS5.");
+}
+
+function isValidProxyHost(value: string): boolean {
+  const host = value.trim().replace(/^\[|\]$/g, "");
+  if (!host || host.length > 253 || /[\s/@?#]/.test(host)) return false;
+  return isIP(host) !== 0 || /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?$/.test(host);
 }
 
 function catalogVendorFromId(id: string): string | undefined {
@@ -562,6 +611,27 @@ async function setCharging(value: unknown): Promise<void> {
   log("success", `${options.avdName} AC power ${options.charging ? "connected" : "disconnected"}.`);
 }
 
+async function setEmulatorLocation(value: unknown): Promise<void> {
+  if (!value || typeof value !== "object") throw new Error("Invalid emulator location request.");
+  const options = value as { avdName?: unknown; latitude?: unknown; longitude?: unknown };
+  if (typeof options.avdName !== "string" || !safeAvdName(options.avdName)) {
+    throw new Error("Choose a valid AVD name.");
+  }
+  if (typeof options.latitude !== "number" || !Number.isFinite(options.latitude) || options.latitude < -90 || options.latitude > 90) {
+    throw new Error("Latitude must be between -90 and 90 degrees.");
+  }
+  if (typeof options.longitude !== "number" || !Number.isFinite(options.longitude) || options.longitude < -180 || options.longitude > 180) {
+    throw new Error("Longitude must be between -180 and 180 degrees.");
+  }
+  const serial = (await listRunningAvds()).get(options.avdName);
+  if (!serial) throw new Error(`${options.avdName} is not running.`);
+  await run(requireTool("adbPath"), [
+    "-s", serial, "emu", "geo", "fix",
+    String(options.longitude), String(options.latitude)
+  ]);
+  log("success", `${options.avdName} emulator location updated.`);
+}
+
 async function launch(options: LaunchOptions): Promise<void> {
   const avds = await listAvds();
   const selectedAvd = avds.find((avd) => avd.name === options.avdName);
@@ -585,6 +655,9 @@ async function launch(options: LaunchOptions): Promise<void> {
   const running = await listRunningAvds();
   const currentSerial = running.get(options.avdName);
   if (currentSerial) {
+    if (options.proxy.mode !== "none") {
+      throw new Error("Proxy settings apply only when an emulator starts. Stop this AVD, then open it again to apply the selected proxy.");
+    }
     await applyOrientation(currentSerial, options.orientation);
     await applyChargingState(currentSerial, options.charging);
     log("info", `${options.avdName} is already running; applied ${options.orientation.toLowerCase()} orientation and ${options.charging ? "enabled" : "disabled"} AC charging.`);
@@ -596,21 +669,38 @@ async function launch(options: LaunchOptions): Promise<void> {
     return;
   }
   const executable = requireTool("emulatorPath");
-  const child = spawn(executable, ["-avd", options.avdName, "-gpu", options.graphics], {
-    shell: false,
-    windowsHide: true,
-    detached: process.platform !== "win32",
-    stdio: "ignore"
-  });
+  const args = ["-avd", options.avdName, "-gpu", options.graphics];
+  if (options.proxy.mode !== "none") {
+    const bridge = await createEmulatorProxyBridge(options.proxy);
+    socksBridges.set(options.avdName, bridge);
+    args.push("-http-proxy", `http://127.0.0.1:${bridge.port}`);
+  }
+  let child: ChildProcess;
+  try {
+    child = spawn(executable, args, {
+      shell: false,
+      windowsHide: true,
+      detached: process.platform !== "win32",
+      stdio: "ignore"
+    });
+  } catch (error) {
+    socksBridges.get(options.avdName)?.close();
+    socksBridges.delete(options.avdName);
+    throw error;
+  }
   runningProcesses.set(options.avdName, child);
   let launchFailure: string | undefined;
   child.once("error", (error) => {
     launchFailure = `Emulator failed to start: ${error.message}`;
     runningProcesses.delete(options.avdName);
+    socksBridges.get(options.avdName)?.close();
+    socksBridges.delete(options.avdName);
     log("error", launchFailure);
   });
   child.once("exit", (code) => {
     runningProcesses.delete(options.avdName);
+    socksBridges.get(options.avdName)?.close();
+    socksBridges.delete(options.avdName);
     if (code !== 0) launchFailure = `${options.avdName} emulator process exited${code === null ? "" : ` with exit code ${code}`}.`;
     log(code === 0 ? "info" : "error", code === 0 ? `${options.avdName} stopped.` : launchFailure ?? `${options.avdName} emulator process exited unexpectedly.`);
   });
@@ -766,6 +856,13 @@ function registerIpc(): void {
   ipcMain.handle("emulator:launch", async (_event, value: unknown) => {
     await launch(validateLaunchOptions(value));
   });
+  ipcMain.handle("emulator:proxy-test", async (_event, value: unknown) => {
+    const proxy = validateEmulatorProxy(value);
+    if (proxy.mode === "none") throw new Error("Choose HTTP proxy or SOCKS5 and enter its server details first.");
+    await testEmulatorProxyConnection(proxy);
+    log("success", "Proxy connection and HTTPS tunnel test passed.");
+  });
+  ipcMain.handle("emulator:location", async (_event, value: unknown) => setEmulatorLocation(value));
   ipcMain.handle("emulator:charging", async (_event, value: unknown) => setCharging(value));
   ipcMain.handle("emulator:stop", async (_event, value: unknown) => {
     if (typeof value !== "string") throw new Error("Invalid AVD name.");
@@ -773,6 +870,11 @@ function registerIpc(): void {
   });
   ipcMain.handle("avd:create", async (_event, value: unknown) => createAvd(value));
 }
+
+app.on("before-quit", () => {
+  for (const bridge of socksBridges.values()) bridge.close();
+  socksBridges.clear();
+});
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({

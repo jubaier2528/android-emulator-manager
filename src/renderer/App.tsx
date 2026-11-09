@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type
 import {
   Activity, AlertCircle, ArrowDownToLine, ArrowLeftRight, ChevronDown, ChevronRight,
   CircleHelp, Clock3, Code2, Cpu, Database, ExternalLink, Heart, LayoutDashboard, LoaderCircle, MemoryStick,
-  Monitor, MoreHorizontal, Play, Plus, RefreshCw, RotateCw, Search, Settings2, Smartphone,
-  Sparkles, Terminal, Trash2, Usb, X, Cloud
+  MapPin, Monitor, MoreHorizontal, Play, Plus, RefreshCw, RotateCw, Search, Settings2, Smartphone,
+  Sparkles, Terminal, Trash2, Usb, Wifi, X, Cloud
 } from "lucide-react";
 import type {
-  ApkSelection, AvdInfo, ConnectedDevice, DeviceProfile, EmulatorLog, GraphicsMode, Orientation, SdkStatus, SystemImage
+  ApkSelection, AvdInfo, ConnectedDevice, DeviceProfile, EmulatorLog, EmulatorProxy, GraphicsMode, Orientation, ProxyMode, SdkStatus, SystemImage
 } from "../electron/shared";
 import { brands, devices, type CatalogDevice } from "./devices";
 import { PhoneArt } from "./PhoneArt";
@@ -108,6 +108,17 @@ function App() {
   const [graphics, setGraphics] = useState<GraphicsMode>("auto");
   const [charging, setCharging] = useState(true);
   const [chargingBusy, setChargingBusy] = useState(false);
+  const [proxyMode, setProxyMode] = useState<ProxyMode>(() => readStorage("aem-proxy-mode", "none"));
+  const [proxyHost, setProxyHost] = useState(() => readStorage("aem-proxy-host", ""));
+  const [proxyPort, setProxyPort] = useState(() => readStorage("aem-proxy-port", "1080"));
+  const [proxyUsername, setProxyUsername] = useState("");
+  const [proxyPassword, setProxyPassword] = useState("");
+  const [proxyTesting, setProxyTesting] = useState(false);
+  const [proxyTestResult, setProxyTestResult] = useState<{ ok: boolean; message: string }>();
+  const [gpsLatitude, setGpsLatitude] = useState("");
+  const [gpsLongitude, setGpsLongitude] = useState("");
+  const [gpsBusy, setGpsBusy] = useState(false);
+  const [gpsResult, setGpsResult] = useState("");
   const [query, setQuery] = useState("");
   const [brand, setBrand] = useState<(typeof brands)[number]>("All devices");
   const [favorites, setFavorites] = useState<string[]>(() => readStorage("aem-favorites", []));
@@ -270,6 +281,12 @@ function App() {
   }, [recent]);
 
   useEffect(() => {
+    localStorage.setItem("aem-proxy-mode", JSON.stringify(proxyMode));
+    localStorage.setItem("aem-proxy-host", JSON.stringify(proxyHost));
+    localStorage.setItem("aem-proxy-port", JSON.stringify(proxyPort));
+  }, [proxyHost, proxyMode, proxyPort]);
+
+  useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -297,6 +314,14 @@ function App() {
   const recentDevices = recent.map((id) => devices.find((device) => device.id === id)).filter((device): device is CatalogDevice => Boolean(device));
   const createProfiles = selected ? profiles.filter((profile) => matchesDeviceProfile(profile, selected)) : [];
   const createImages = selected ? images.filter((image) => nativeSystemImage([image], selected) !== undefined) : [];
+  const emulatorProxy: EmulatorProxy = proxyMode === "none"
+    ? { mode: "none" }
+    : {
+      mode: proxyMode,
+      host: proxyHost.trim(),
+      port: Number(proxyPort),
+      ...(proxyUsername || proxyPassword ? { username: proxyUsername, password: proxyPassword } : {})
+    };
 
   function chooseDevice(device: CatalogDevice) {
     setSelected(device);
@@ -434,7 +459,8 @@ function App() {
         avdName: avd.name,
         orientation,
         graphics,
-        charging
+        charging,
+        proxy: emulatorProxy
       });
       setRecent((current) => [device.id, ...current.filter((id) => id !== device.id)].slice(0, 5));
       await refresh(true);
@@ -461,7 +487,8 @@ function App() {
         avdName: avd.name,
         orientation,
         graphics,
-        charging
+        charging,
+        proxy: emulatorProxy
       });
       if (device) setRecent((current) => [device.id, ...current.filter((id) => id !== device.id)].slice(0, 5));
       await refresh(true);
@@ -506,6 +533,47 @@ function App() {
       addLog("error", message);
     } finally {
       setChargingBusy(false);
+    }
+  }
+
+  async function testConfiguredProxy() {
+    setProxyTesting(true);
+    setProxyTestResult(undefined);
+    try {
+      await window.emulatorManager.testProxy(emulatorProxy);
+      setProxyTestResult({ ok: true, message: "Proxy connected; HTTPS tunnel test passed." });
+      addLog("success", "Proxy connection and HTTPS tunnel test passed.");
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setProxyTestResult({ ok: false, message });
+      addLog("error", `Proxy test failed: ${message}`);
+    } finally {
+      setProxyTesting(false);
+    }
+  }
+
+  async function setEmulatorGpsLocation() {
+    if (!activeAvd || activeAvd.status !== "running") return;
+    const latitude = Number(gpsLatitude);
+    const longitude = Number(gpsLongitude);
+    if (!gpsLatitude.trim() || !gpsLongitude.trim() ||
+      !Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+      !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      setGpsResult("Enter latitude -90 to 90 and longitude -180 to 180.");
+      return;
+    }
+    setGpsBusy(true);
+    setGpsResult("");
+    try {
+      await window.emulatorManager.setEmulatorLocation(activeAvd.name, latitude, longitude);
+      setGpsResult(`Location sent: ${latitude}, ${longitude}`);
+      addLog("success", `${activeAvd.displayName} emulator location updated.`);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setGpsResult(message);
+      addLog("error", message);
+    } finally {
+      setGpsBusy(false);
     }
   }
 
@@ -675,6 +743,32 @@ function App() {
                   <div className="setting-row"><div><strong>Orientation</strong><span>Applied after emulator boots</span></div><div className="segmented-control"><button className={orientation === "Portrait" ? "chosen" : ""} onClick={() => setOrientation("Portrait")} aria-pressed={orientation === "Portrait"}>Portrait</button><button className={orientation === "Landscape" ? "chosen" : ""} onClick={() => setOrientation("Landscape")} aria-pressed={orientation === "Landscape"}>Landscape</button></div></div>
                   <div className="setting-row power-row"><div><strong>AC charging</strong><span>{activeAvd?.status === "running" ? "Applied immediately" : "Applied when emulator opens"}</span></div><div className="segmented-control" role="group" aria-label="Emulator AC charging"><button className={charging ? "chosen" : ""} onClick={() => void updateCharging(true)} aria-pressed={charging} disabled={chargingBusy || emulatorStarting}>Charging</button><button className={!charging ? "chosen" : ""} onClick={() => void updateCharging(false)} aria-pressed={!charging} disabled={chargingBusy || emulatorStarting}>Off</button></div></div>
                   <div className="setting-row graphics-row"><div><strong>Graphics</strong><span>Emulator rendering mode</span></div><select value={graphics} onChange={(event) => setGraphics(event.target.value as GraphicsMode)} aria-label="Emulator graphics mode">{graphicsOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
+                  <div className="proxy-setting">
+                    <label className="proxy-mode"><span><strong>Network proxy</strong><small>Applied when emulator starts</small></span><select value={proxyMode} onChange={(event) => setProxyMode(event.target.value as ProxyMode)} aria-label="Emulator network proxy"><option value="none">No proxy</option><option value="http">HTTP proxy</option><option value="socks5">SOCKS5</option></select></label>
+                    {proxyMode !== "none" && <div className="proxy-fields">
+                      <input value={proxyHost} onChange={(event) => setProxyHost(event.target.value)} placeholder="Proxy host or IP" aria-label="Proxy host or IP" autoComplete="off" />
+                      <input value={proxyPort} onChange={(event) => setProxyPort(event.target.value)} type="number" min="1" max="65535" placeholder="Port" aria-label="Proxy port" />
+                      <input value={proxyUsername} onChange={(event) => setProxyUsername(event.target.value)} placeholder="Username (optional)" aria-label="Proxy username" autoComplete="off" />
+                      <input value={proxyPassword} onChange={(event) => setProxyPassword(event.target.value)} type="password" placeholder="Password (optional)" aria-label="Proxy password" autoComplete="new-password" />
+                    </div>}
+                    <p>{proxyMode === "socks5" ? "SOCKS5 supports optional username/password authentication." : proxyMode === "http" ? "HTTP proxy supports optional Basic authentication and HTTPS website traffic through CONNECT." : "Direct network connection; no proxy is used."}{proxyMode !== "none" && (proxyUsername || proxyPassword) ? " Credentials stay in memory and are not saved or logged. Proxy credentials are not encrypted in transit; use a trusted network." : ""}{activeAvd?.status === "running" && proxyMode !== "none" ? " Stop and reopen the running AVD to apply proxy changes." : ""}</p>
+                    <button className="secondary-button proxy-test-button" onClick={() => void testConfiguredProxy()} disabled={proxyTesting || launching || proxyMode === "none" || !proxyHost.trim() || !proxyPort.trim()}>
+                      {proxyTesting ? <><LoaderCircle size={13} className="spin" /> Testing proxy</> : <><Wifi size={13} /> Test proxy connection</>}
+                    </button>
+                    {proxyTestResult && <p className={`proxy-test-result${proxyTestResult.ok ? " good" : " bad"}`} role="status">{proxyTestResult.message}</p>}
+                  </div>
+                  <div className="gps-setting">
+                    <div className="gps-setting-head"><MapPin size={14} /><span><strong>Emulator GPS location</strong><small>{activeAvd?.status === "running" ? "Send a mock GPS fix to the running AVD" : "Start an emulator to set its GPS location"}</small></span></div>
+                    <div className="gps-fields">
+                      <input value={gpsLatitude} onChange={(event) => setGpsLatitude(event.target.value)} type="number" min="-90" max="90" step="any" placeholder="Latitude (-90 to 90)" aria-label="GPS latitude" disabled={activeAvd?.status !== "running" || gpsBusy} />
+                      <input value={gpsLongitude} onChange={(event) => setGpsLongitude(event.target.value)} type="number" min="-180" max="180" step="any" placeholder="Longitude (-180 to 180)" aria-label="GPS longitude" disabled={activeAvd?.status !== "running" || gpsBusy} />
+                    </div>
+                    <button className="secondary-button gps-apply-button" onClick={() => void setEmulatorGpsLocation()} disabled={activeAvd?.status !== "running" || gpsBusy || emulatorStarting}>
+                      {gpsBusy ? <><LoaderCircle size={13} className="spin" /> Sending location</> : <><MapPin size={13} /> Set emulator location</>}
+                    </button>
+                    <p className="gps-note">Uses the emulator GPS provider. Android location must be enabled, and apps need location permission to read it.</p>
+                    {gpsResult && <p className={`gps-result${gpsResult.startsWith("Location sent:") ? " good" : " bad"}`} role="status">{gpsResult}</p>}
+                  </div>
                   {!activeAvd && <div className="spec-note"><CircleHelp size={13} /> Only exact manufacturer profiles and positively identified vendor OS images are accepted. Generic Android images cannot substitute.</div>}
                 </aside>
               </section>
