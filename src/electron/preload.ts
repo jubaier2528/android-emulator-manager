@@ -13,6 +13,7 @@ const api: EmulatorApi = {
   listSystemImages: () => ipcRenderer.invoke("sdk:images"),
   listDeviceProfiles: () => ipcRenderer.invoke("sdk:profiles"),
   launch: (options) => ipcRenderer.invoke("emulator:launch", options),
+  setCharging: (avdName, charging) => ipcRenderer.invoke("emulator:charging", { avdName, charging }),
   stop: (avdName) => ipcRenderer.invoke("emulator:stop", avdName),
   createAvd: (options) => ipcRenderer.invoke("avd:create", options),
   onLog: (callback) => {

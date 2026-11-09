@@ -106,6 +106,8 @@ function App() {
   const [selectedAvd, setSelectedAvd] = useState("");
   const [orientation, setOrientation] = useState<Orientation>("Portrait");
   const [graphics, setGraphics] = useState<GraphicsMode>("auto");
+  const [charging, setCharging] = useState(true);
+  const [chargingBusy, setChargingBusy] = useState(false);
   const [query, setQuery] = useState("");
   const [brand, setBrand] = useState<(typeof brands)[number]>("All devices");
   const [favorites, setFavorites] = useState<string[]>(() => readStorage("aem-favorites", []));
@@ -431,7 +433,8 @@ function App() {
         device: { id: device.id, name: device.name, brand: device.brand },
         avdName: avd.name,
         orientation,
-        graphics
+        graphics,
+        charging
       });
       setRecent((current) => [device.id, ...current.filter((id) => id !== device.id)].slice(0, 5));
       await refresh(true);
@@ -457,7 +460,8 @@ function App() {
         },
         avdName: avd.name,
         orientation,
-        graphics
+        graphics,
+        charging
       });
       if (device) setRecent((current) => [device.id, ...current.filter((id) => id !== device.id)].slice(0, 5));
       await refresh(true);
@@ -483,6 +487,25 @@ function App() {
       setError(message);
       addLog("error", message);
       return false;
+    }
+  }
+
+  async function updateCharging(charging: boolean) {
+    setCharging(charging);
+    if (activeAvd?.status !== "running") return;
+    setChargingBusy(true);
+    setError("");
+    try {
+      await window.emulatorManager.setCharging(activeAvd.name, charging);
+      addLog("success", `${activeAvd.displayName} charging ${charging ? "enabled" : "disabled"}.`);
+      await refresh(true);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setCharging(!charging);
+      setError(message);
+      addLog("error", message);
+    } finally {
+      setChargingBusy(false);
     }
   }
 
@@ -650,6 +673,7 @@ function App() {
                   </div>
                   <div className="config-separator" />
                   <div className="setting-row"><div><strong>Orientation</strong><span>Applied after emulator boots</span></div><div className="segmented-control"><button className={orientation === "Portrait" ? "chosen" : ""} onClick={() => setOrientation("Portrait")} aria-pressed={orientation === "Portrait"}>Portrait</button><button className={orientation === "Landscape" ? "chosen" : ""} onClick={() => setOrientation("Landscape")} aria-pressed={orientation === "Landscape"}>Landscape</button></div></div>
+                  <div className="setting-row power-row"><div><strong>AC charging</strong><span>{activeAvd?.status === "running" ? "Applied immediately" : "Applied when emulator opens"}</span></div><div className="segmented-control" role="group" aria-label="Emulator AC charging"><button className={charging ? "chosen" : ""} onClick={() => void updateCharging(true)} aria-pressed={charging} disabled={chargingBusy || emulatorStarting}>Charging</button><button className={!charging ? "chosen" : ""} onClick={() => void updateCharging(false)} aria-pressed={!charging} disabled={chargingBusy || emulatorStarting}>Off</button></div></div>
                   <div className="setting-row graphics-row"><div><strong>Graphics</strong><span>Emulator rendering mode</span></div><select value={graphics} onChange={(event) => setGraphics(event.target.value as GraphicsMode)} aria-label="Emulator graphics mode">{graphicsOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
                   {!activeAvd && <div className="spec-note"><CircleHelp size={13} /> Only exact manufacturer profiles and positively identified vendor OS images are accepted. Generic Android images cannot substitute.</div>}
                 </aside>

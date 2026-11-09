@@ -156,7 +156,9 @@ h1 span { color: #b99afd; }
 .setting-row > div:first-child span { margin-top: 3px; color: #777d88; font-size: 8px; }
 .segmented-control { display: flex; padding: 2px; border: 1px solid #30313a; border-radius: 6px; background: #15171d; }
 .segmented-control button { height: 23px; padding: 0 8px; border: 0; border-radius: 4px; color: #858a95; background: transparent; font-size: 8px; cursor: pointer; }
+.segmented-control button:disabled { opacity: .5; cursor: default; }
 .segmented-control button.chosen { color: #decaff; background: #352c42; box-shadow: inset 0 0 0 1px #514364; }
+.power-row .segmented-control button { padding: 0 7px; }
 .graphics-row { margin-top: 5px; }
 .graphics-row select { width: 148px; height: 27px; padding: 0 7px; border: 1px solid #34363f; border-radius: 5px; color: #c3c4cd; background: #202229; font-size: 8px; }
 .spec-note { display: flex; align-items: center; gap: 5px; margin-top: 7px; color: #777d88; font-size: 8px; }

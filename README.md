@@ -60,7 +60,8 @@ Electron inherits environment variables from the process that starts it. If you 
 - Persists favorites and recently launched catalog selections in local browser storage.
 - Discovers AVDs with `emulator -list-avds`, reads their `.ini` and `config.ini` files, and checks runtime state through `adb devices`.
 - Shows resolution, RAM, image API, configured display size (derived from the AVD's configured pixel dimensions and density), and hardware profile only when present in SDK configuration.
-- Starts an installed AVD with `emulator -avd <name> -gpu <mode>`, applies portrait/landscape rotation with ADB after startup, and stops it with `adb -s <serial> emu kill`.
+- Starts an installed AVD with `emulator -avd <name> -gpu <mode>`, applies portrait/landscape rotation and the selected AC charging state after startup, and stops it with `adb -s <serial> emu kill`.
+- Lets you turn emulator AC charging on or off before launch, or apply the change immediately to a running emulator through the Android Emulator console.
 - Creates AVDs only from exact manufacturer profiles returned by `avdmanager list device` and SDK-installed images with matching vendor and OS-flavor metadata. Samsung images must identify One UI, Xiaomi images HyperOS/MIUI, and OnePlus images OxygenOS. It refuses to pass off stock Android or a Pixel profile as another manufacturer's device/OS.
 - Keeps an activity log and displays SDK, AVD, running emulator, and ADB-connected device status.
 - Includes a Samsung Remote Test Lab launchpad that opens Samsung's official service and explains its sign-in/device-selection flow. Samsung handles the remote session on its own website; this app does not embed or control it.

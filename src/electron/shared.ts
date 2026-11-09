@@ -79,6 +79,7 @@ export interface LaunchOptions {
   avdName: string;
   orientation: Orientation;
   graphics: GraphicsMode;
+  charging: boolean;
 }
 
 export interface CreateAvdOptions {
@@ -102,6 +103,7 @@ export interface EmulatorApi {
   listSystemImages(): Promise<SystemImage[]>;
   listDeviceProfiles(): Promise<DeviceProfile[]>;
   launch(options: LaunchOptions): Promise<void>;
+  setCharging(avdName: string, charging: boolean): Promise<void>;
   stop(avdName: string): Promise<void>;
   createAvd(options: CreateAvdOptions): Promise<void>;
   onLog(callback: (log: EmulatorLog) => void): () => void;

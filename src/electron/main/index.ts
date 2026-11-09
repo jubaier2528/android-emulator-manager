@@ -525,6 +525,7 @@ function validateLaunchOptions(value: unknown): LaunchOptions {
   }
   if (!orientations.includes(options.orientation as Orientation)) throw new Error("Choose a supported orientation.");
   if (!graphicsModes.includes(options.graphics as GraphicsMode)) throw new Error("Choose a supported graphics mode.");
+  if (typeof options.charging !== "boolean") throw new Error("Choose whether the emulator should be charging.");
   return options as LaunchOptions;
 }
 
@@ -541,6 +542,24 @@ async function applyOrientation(serial: string, orientation: Orientation): Promi
   const rotation = orientation === "Landscape" ? "1" : "0";
   await run(requireTool("adbPath"), ["-s", serial, "shell", "settings", "put", "system", "accelerometer_rotation", "0"]);
   await run(requireTool("adbPath"), ["-s", serial, "shell", "settings", "put", "system", "user_rotation", rotation]);
+}
+
+async function applyChargingState(serial: string, charging: boolean): Promise<void> {
+  if (!/^emulator-\d+$/.test(serial)) throw new Error("Invalid emulator serial.");
+  await run(requireTool("adbPath"), ["-s", serial, "emu", "power", "ac", charging ? "on" : "off"]);
+}
+
+async function setCharging(value: unknown): Promise<void> {
+  if (!value || typeof value !== "object") throw new Error("Invalid charging-state request.");
+  const options = value as { avdName?: unknown; charging?: unknown };
+  if (typeof options.avdName !== "string" || !safeAvdName(options.avdName)) {
+    throw new Error("Choose a valid AVD name.");
+  }
+  if (typeof options.charging !== "boolean") throw new Error("Choose whether the emulator should be charging.");
+  const serial = (await listRunningAvds()).get(options.avdName);
+  if (!serial) throw new Error(`${options.avdName} is not running.`);
+  await applyChargingState(serial, options.charging);
+  log("success", `${options.avdName} AC power ${options.charging ? "connected" : "disconnected"}.`);
 }
 
 async function launch(options: LaunchOptions): Promise<void> {
@@ -567,7 +586,8 @@ async function launch(options: LaunchOptions): Promise<void> {
   const currentSerial = running.get(options.avdName);
   if (currentSerial) {
     await applyOrientation(currentSerial, options.orientation);
-    log("info", `${options.avdName} is already running; applied ${options.orientation.toLowerCase()} orientation.`);
+    await applyChargingState(currentSerial, options.charging);
+    log("info", `${options.avdName} is already running; applied ${options.orientation.toLowerCase()} orientation and ${options.charging ? "enabled" : "disabled"} AC charging.`);
     return;
   }
   const activeProcess = runningProcesses.get(options.avdName);
@@ -611,6 +631,11 @@ async function launch(options: LaunchOptions): Promise<void> {
     await applyOrientation(serial, options.orientation);
   } catch (error) {
     log("warning", `Emulator started, but orientation could not be applied yet: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    await applyChargingState(serial, options.charging);
+  } catch (error) {
+    log("warning", `Emulator started, but AC charging could not be changed: ${error instanceof Error ? error.message : String(error)}`);
   }
   log("success", `${options.device.name} is running as ${serial}.`);
 }
@@ -741,6 +766,7 @@ function registerIpc(): void {
   ipcMain.handle("emulator:launch", async (_event, value: unknown) => {
     await launch(validateLaunchOptions(value));
   });
+  ipcMain.handle("emulator:charging", async (_event, value: unknown) => setCharging(value));
   ipcMain.handle("emulator:stop", async (_event, value: unknown) => {
     if (typeof value !== "string") throw new Error("Invalid AVD name.");
     await stop(value);
