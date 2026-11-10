@@ -44,6 +44,7 @@ async function findOnPath(name: string): Promise<string | undefined> {
     ...(process.env.PATH ?? "").split(path.delimiter),
     process.platform === "darwin" ? "/opt/homebrew/bin" : undefined,
     process.platform === "darwin" ? "/usr/local/bin" : undefined,
+    process.platform === "darwin" ? "/usr/bin" : undefined,
     process.platform === "linux" ? "/usr/bin" : undefined
   ].filter((directory): directory is string => Boolean(directory));
   for (const directory of [...new Set(directories)]) {
@@ -493,13 +494,31 @@ async function requireIosSimulator(udid: unknown): Promise<{ simulator: IosSimul
   return { simulator, xcrunPath };
 }
 
+async function findSimulatorApp(xcrunPath: string): Promise<string> {
+  const developerDirectory = path.resolve(path.dirname(xcrunPath), "../..");
+  const candidates = [
+    path.join(developerDirectory, "Applications", "Simulator.app"),
+    "/Applications/Simulator.app"
+  ];
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("The iPhone runtime booted, but Simulator.app is missing from this Xcode installation. Repair or reinstall Xcode with the Simulator app included.");
+}
+
 async function bootIosSimulator(udid: unknown): Promise<void> {
   const { simulator, xcrunPath } = await requireIosSimulator(udid);
   if (simulator.state !== "Booted") {
     await run(xcrunPath, ["simctl", "boot", simulator.udid]);
   }
   await run(xcrunPath, ["simctl", "bootstatus", simulator.udid, "-b"], 120_000);
-  await run("/usr/bin/open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", simulator.udid]);
+  const simulatorApp = await findSimulatorApp(xcrunPath);
+  await run("/usr/bin/open", ["-a", simulatorApp, "--args", "-CurrentDeviceUDID", simulator.udid]);
   log("success", `${simulator.name} is running in iPhone Simulator.`);
 }
 

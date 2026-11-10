@@ -1,6 +1,6 @@
 {
   "name": "android-emulator-manager",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "A desktop Android Virtual Device manager for VS Code users.",
   "main": "dist-electron/main/index.js",

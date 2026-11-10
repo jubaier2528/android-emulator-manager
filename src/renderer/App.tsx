@@ -233,6 +233,7 @@ function App() {
       await refresh(true);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
+      if (action === "boot") await refresh(true);
       setError(message);
       addLog("error", message);
     } finally {
